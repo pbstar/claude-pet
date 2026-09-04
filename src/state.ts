@@ -1,4 +1,4 @@
-// 纯函数：状态解析、超时兜底、Esc 中断检测、多会话聚合。与 UI 无关，用 vitest 单测。
+// 纯函数：状态解析、超时兜底、Esc 中断检测、多会话聚合。与 UI 无关。
 export type RawSession = {
   state: string;
   ts: number;

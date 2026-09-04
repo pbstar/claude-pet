@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.local.claudepet",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "vite",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "tsc && vite build",
     "frontendDist": "../dist"
   },
   "app": {

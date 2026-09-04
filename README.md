@@ -46,19 +46,13 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
 
 ```bash
 pnpm install
-pnpm tauri dev
-```
-
-### 测试
-
-```bash
-pnpm test   # state.ts 的 FSM 单测（vitest）
+pnpm dev
 ```
 
 ### 构建 `.app`
 
 ```bash
-pnpm tauri build
+pnpm build
 ```
 
 产物在 `src-tauri/target/release/bundle/macos/ClaudePet.app`。hooks 脚本内嵌在二进制中（`src-tauri/hook.sh` 通过 `include_str!` 编译进去），首次启动自动安装，无需任何额外步骤。
@@ -84,7 +78,7 @@ SessionEnd                  → 清理       │  └─ renderer.ts
 
 ```
 src/               # TS 业务逻辑
-  state.ts         # 纯函数：解析/超时/聚合（可单测）
+  state.ts         # 纯函数：解析/超时/聚合
   poller.ts        # 轮询调度
   renderer.ts      # 三态渲染
   main.ts          # 装配
