@@ -10,12 +10,13 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "title": "ClaudePet",
-        "width": 180,
-        "height": 140,
+        "width": 112,
+        "height": 80,
         "resizable": false,
         "decorations": false,
         "transparent": true,

@@ -1,8 +1,8 @@
-// 纯函数：状态解析、超时兜底、多会话聚合。与 UI 无关，可用 vitest 单测。
+// 纯函数：状态解析、超时兜底、Esc 中断检测、多会话聚合。与 UI 无关，用 vitest 单测。
 export type RawSession = {
   state: string;
   ts: number;
-  transcript: string;
+  lastTurnLine: string;
 };
 
 export type DisplayState = "walking" | "alert" | "rest";
@@ -10,10 +10,13 @@ export type DisplayState = "walking" | "alert" | "rest";
 // 超时兜底（秒）：hook 进程被强杀时，状态不会永久冻结
 const WORKING_TIMEOUT = 15 * 60; // thinking/tool 超 15 分钟 → rest
 const PERMISSION_TIMEOUT = 2 * 60 * 60; // permission 超 2 小时 → rest
+const INTERRUPT_MARKER = "interrupted by user";
 
 export function effectiveState(s: RawSession, now: number): string {
   if (s.state === "thinking" || s.state === "tool") {
-    return now - s.ts > WORKING_TIMEOUT ? "rest" : s.state;
+    if (now - s.ts > WORKING_TIMEOUT) return "rest";
+    if (s.lastTurnLine.includes(INTERRUPT_MARKER)) return "rest";
+    return s.state;
   }
   if (s.state === "permission") {
     return now - s.ts > PERMISSION_TIMEOUT ? "rest" : "permission";

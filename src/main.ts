@@ -2,6 +2,8 @@ import "./style.css";
 import { aggregate } from "./state";
 import { fetchSessions } from "./poller";
 import { render } from "./renderer";
+import { restorePosition, rememberPosition } from "./window-pos";
+import "./menu";
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -14,7 +16,13 @@ async function tick(): Promise<void> {
     console.error("poll failed:", e);
     render("rest");
   }
+  void rememberPosition();
 }
 
-void tick();
-setInterval(tick, POLL_INTERVAL_MS);
+async function boot(): Promise<void> {
+  await restorePosition();
+  void tick();
+  setInterval(tick, POLL_INTERVAL_MS);
+}
+
+void boot();

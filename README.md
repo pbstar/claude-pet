@@ -13,6 +13,8 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
   - 😴 趴下 —— 空闲 / 完成（半透明）
 - **轻量**：Tauri v2 + 系统 WKWebView，不捆绑 Chromium；产物 ~9.6MB
 - **自带数据源**：极简 shell hooks（不依赖 claude-status-bar，可独立工作）
+- **位置记忆**：拖动位置自动记住，重启还原
+- **右键退出**：右键菜单退出应用
 
 ## 技术栈
 
@@ -37,6 +39,12 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
 ```bash
 pnpm install
 pnpm tauri dev
+```
+
+### 测试
+
+```bash
+pnpm test   # state.ts 的 FSM 单测（vitest）
 ```
 
 ### 构建 `.app`
