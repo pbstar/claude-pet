@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 环境
+.env
+.env.*
+!.env.example

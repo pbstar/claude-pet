@@ -1,0 +1,36 @@
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#crab {
+  position: absolute;
+  inset: 0;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  image-rendering: pixelated;
+  opacity: 0.7;
+  transition: opacity 0.3s;
+}
+
+#badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: none;
+  font-size: 24px;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
