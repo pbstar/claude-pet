@@ -6,6 +6,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+// 内嵌的 hook 脚本（编译期从 src-tauri/hook.sh 读入）
+const HOOK_SCRIPT: &str = include_str!("../hook.sh");
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Session {
@@ -78,7 +81,94 @@ fn quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// 首次启动自安装：写 hook.sh 到 ~/.claude/claude-pet/，并把 7 个事件 hook 合并进 settings.json
+fn ensure_hooks_installed() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    let pet_dir = home.join(".claude/claude-pet");
+    let hook_dest = pet_dir.join("hook.sh");
+    let settings_path = home.join(".claude/settings.json");
+
+    // 1. 写 hook.sh（幂等；每次启动刷新，保证升级后脚本同步）
+    if fs::create_dir_all(&pet_dir).is_err() {
+        return;
+    }
+    if fs::write(&hook_dest, HOOK_SCRIPT).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&hook_dest, fs::Permissions::from_mode(0o755));
+    }
+
+    // 2. 合并 hooks 到 settings.json（先剥离旧的再追加，幂等）
+    let mut settings = match fs::read_to_string(&settings_path) {
+        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    if settings_path.exists() {
+        let bak = settings_path.with_extension("json.bak-claude-pet");
+        if !bak.exists() {
+            let _ = fs::copy(&settings_path, &bak);
+        }
+    }
+
+    let hook_cmd = format!("bash '{}'", hook_dest.display());
+    const EVENTS: &[(&str, &str, bool)] = &[
+        // (事件名, hook 参数, 是否带 matcher "*")
+        ("UserPromptSubmit", "thinking", false),
+        ("PreToolUse", "tool", true),
+        ("PostToolUse", "thinking", true),
+        ("Notification", "notify", false),
+        ("PermissionRequest", "permission", true),
+        ("Stop", "done", false),
+        ("SessionEnd", "clean", false),
+    ];
+
+    if settings.get("hooks").and_then(|h| h.as_object()).is_none() {
+        settings["hooks"] = serde_json::json!({});
+    }
+    let hooks = settings["hooks"].as_object_mut().unwrap();
+
+    for &(event, arg, matched) in EVENTS {
+        let arr = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .unwrap();
+
+        // 剥离本应用已存在的 hook 条目（按 command 是否引用 pet 目录判断）
+        arr.retain(|entry| {
+            entry["hooks"].as_array().map_or(true, |hs| {
+                hs.iter().all(|h| {
+                    h["command"]
+                        .as_str()
+                        .map_or(true, |c| !c.contains(".claude/claude-pet"))
+                })
+            })
+        });
+
+        let mut new_entry = serde_json::json!({});
+        if matched {
+            new_entry["matcher"] = serde_json::json!("*");
+        }
+        new_entry["hooks"] = serde_json::json!([{
+            "type": "command",
+            "command": format!("{hook_cmd} {arg}")
+        }]);
+        arr.push(new_entry);
+    }
+
+    if let Ok(s) = serde_json::to_string_pretty(&settings) {
+        let _ = fs::write(&settings_path, s);
+    }
+}
+
 fn main() {
+    ensure_hooks_installed();
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![read_sessions, quit])
         .run(tauri::generate_context!())

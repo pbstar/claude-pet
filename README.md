@@ -24,9 +24,17 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
 | 应用逻辑 | TypeScript（状态机、轮询、渲染） |
 | 数据源 | 纯 shell hooks（`~/.claude/claude-pet/`） |
 
-详细设计见 [PLAN.md](PLAN.md)。
+## 安装（普通用户）
 
-## 快速开始
+> 无需装 Node、Rust 或任何依赖——`.app` 已打包好，双击即用。
+
+1. 把 `ClaudePet.app` 拖进「应用程序」（Applications）
+2. 双击启动——首次启动会**自动安装 hooks**（写 `~/.claude/claude-pet/` + 合并 `settings.json`，并自动备份）
+3. 启动后桌面上出现一只螃蟹，开启任意 Claude Code 会话即可看到状态变化
+
+> 提示：本应用无 Dock 图标、无菜单栏图标，只在桌面上悬浮。退出方式：右键螃蟹 → 退出。
+
+## 构建（开发者）
 
 ### 前置
 
@@ -53,15 +61,7 @@ pnpm test   # state.ts 的 FSM 单测（vitest）
 pnpm tauri build
 ```
 
-产物在 `src-tauri/target/release/bundle/macos/ClaudePet.app`，拖到 Applications 即可。
-
-### 安装 hooks（首次，或数据源失效后）
-
-```bash
-node tools/install-hooks.mjs
-```
-
-该脚本把 7 个事件 hook 合并进 `~/.claude/settings.json`（先剥离旧的再追加，幂等），首次自动备份到 `settings.json.bak-claude-pet`。
+产物在 `src-tauri/target/release/bundle/macos/ClaudePet.app`。hooks 脚本内嵌在二进制中（`src-tauri/hook.sh` 通过 `include_str!` 编译进去），首次启动自动安装，无需任何额外步骤。
 
 ## 工作原理
 
@@ -89,18 +89,18 @@ src/               # TS 业务逻辑
   renderer.ts      # 三态渲染
   main.ts          # 装配
 public/crab/       # 20 帧螃蟹素材（自 claude-status-bar 导出）
-tools/             # export-sprite.mjs / hook.sh / install-hooks.mjs
-src-tauri/         # Rust 壳 + tauri.conf.json
+src-tauri/         # Rust 壳 + tauri.conf.json + Info.plist + hook.sh（内嵌）
 ```
 
 ## 卸载
 
 ```bash
-# 1. 移除 settings.json 里的 claude-pet hooks
-node tools/install-hooks.mjs  # 无独立卸载脚本，可手工删除含 ~/.claude/claude-pet 的 hook 命令
-rm -rf ~/.claude/claude-pet   # 2. 删除状态目录
-# 3. 删除 ClaudePet.app 即可
+rm -rf ~/.claude/claude-pet   # 1. 删除状态目录与 hook 脚本
+# 2. 删除 ~/.claude/settings.json 里含 ".claude/claude-pet" 的 hook 命令
+# 3. 把 ClaudePet.app 拖进废纸篓
 ```
+
+> 首次自动安装时已备份原 `settings.json` 到 `settings.json.bak-claude-pet`，可用于恢复。
 
 ## 版权说明
 
