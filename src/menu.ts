@@ -1,26 +1,25 @@
-// 右键菜单：退出应用
+// 右键菜单：原生系统菜单（muda）。原生菜单由 OS 绘制，不受窗口 112×80 边界裁剪，
+// 可从任意位置弹出并支持子菜单/勾选项，扩展菜单时直接往 items 数组加项即可
+import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { invoke } from "@tauri-apps/api/core";
 
-const menu = document.getElementById("menu") as HTMLDivElement;
-const quitBtn = document.getElementById("menu-quit") as HTMLDivElement;
+async function buildMenu(): Promise<Menu> {
+  const quit = await MenuItem.new({
+    id: "quit",
+    text: "退出 ClaudePet",
+    action: () => {
+      void invoke("quit");
+    },
+  });
+  return Menu.new({ items: [quit] });
+}
+
+// 菜单内容静态，懒构建一次后复用，避免每次右键重复创建 OS 资源
+let menuPromise: Promise<Menu> | null = null;
 
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  menu.hidden = false;
-  const rect = menu.getBoundingClientRect();
-  // 防止菜单超出窗口右/下边界
-  let x = e.clientX;
-  let y = e.clientY;
-  if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
-  if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-});
-
-document.addEventListener("click", (e) => {
-  if (!menu.contains(e.target as Node)) menu.hidden = true;
-});
-
-quitBtn.addEventListener("click", () => {
-  void invoke("quit");
+  menuPromise ??= buildMenu();
+  // 不传位置：popup 默认弹出在当前鼠标处，即用户右键的位置
+  void menuPromise.then((m) => m.popup());
 });
