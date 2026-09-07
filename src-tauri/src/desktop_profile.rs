@@ -10,12 +10,10 @@ use crate::models::{ModelsState, DESKTOP_ROUTE, PROXY_URL};
 const PROFILE_ID: &str = "00000000-0000-4000-8000-000000157210";
 const PROFILE_NAME: &str = "ClaudePet";
 
-const DESKTOP_MODELS: &[(&str, bool)] = &[
-    ("claude-fable-5", true),
-    ("claude-opus-5", true),
-    ("claude-sonnet-5", true),
-    ("claude-haiku-4-5", true),
-];
+// 单一哨兵条目：Desktop 选择器只出现 "Claude Custom" 一项且无 1M 派生（supports1m=false）。
+// 切换无意义——代理 resolve_model 会把任何角色/custom 模型名统一替换为 active 条目目标，
+// 实际线路只由 pet 右键菜单决定；名字含 "custom" 由代理侧特判替换（proxy.rs）
+const DESKTOP_MODELS: &[(&str, bool)] = &[("claude-custom", false)];
 
 pub fn ensure_desktop_profile() {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
@@ -87,7 +85,7 @@ fn write_profile(
     models: &[serde_json::Value],
 ) -> std::io::Result<()> {
     fs::create_dir_all(lib)?;
-    // labelOverride 不做——会随切换过期，属于多余状态；模型选择器显示 claude 原名，接受（六.4）
+    // labelOverride 不做；选择器显示 "Claude Custom"（claude-custom 由代理特判替换为 active 目标）
     // inferenceGatewayAuthScheme 显式声明 bearer：代理侧只认 Authorization: Bearer
     fs::write(
         profile,

@@ -88,7 +88,8 @@ proxy.rs (axum, 127.0.0.1:15721)
 - 超时兜底：working 超 15 分钟、permission 超 2 小时自动归为休息（hook 进程被强杀时不冻结）
 - 聚合优先级：任意 `permission` > 任意 `working` > `rest`（等授权的会话永不被工作中掩盖）
 - 代理每请求现读 models.json 取 active 条目：换线路对下一个请求即时生效，跑着的流不断
-- 模型替换：claude-* 角色模型名固定替换为条目目标模型；`supports1m` 控制是否放行 `[1m]` 后缀与 context-1m beta 头
+- 模型替换：claude-* 角色模型名（及 Desktop 选择器写死的 `claude-custom` 哨兵名）固定替换为条目目标模型；`supports1m` 控制是否放行 `[1m]` 后缀与 context-1m beta 头
+- Desktop 模型选择器：profile 只注册单条 `claude-custom`（显示 "Claude Custom"），不可切换、无 1M 派生项；实际线路唯一由 pet 右键菜单的 active 条目决定
 
 ## 目录结构
 

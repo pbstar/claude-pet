@@ -175,7 +175,10 @@ fn resolve_model(src_model: &str, entry: &ModelEntry) -> (String, bool) {
         Some(main) => (main, true),
         None => (src_model, false),
     };
-    let is_role = ["fable", "opus", "sonnet", "haiku"].iter().any(|r| main.to_lowercase().contains(r));
+    // "custom" = Desktop 选择器写死的 claude-custom 哨兵名（desktop_profile.rs），同样替换
+    let is_role = ["fable", "opus", "sonnet", "haiku", "custom"]
+        .iter()
+        .any(|r| main.to_lowercase().contains(r));
     let target = if is_role || main.is_empty() {
         entry.model.clone()
     } else {
