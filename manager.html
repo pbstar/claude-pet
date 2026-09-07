@@ -95,6 +95,7 @@
       button.primary:hover { background: var(--accent-strong); }
       button.primary:active { transform: translateY(0.5px); }
       #msg { color: var(--danger); font-size: 12px; min-height: 16px; }
+      #msg.ok { color: var(--accent); }
       .editing-tag { font-size: 11px; color: var(--accent); }
     </style>
   </head>
@@ -129,6 +130,7 @@
       </label>
       <div class="actions">
         <button type="button" id="cancel" hidden>取消编辑</button>
+        <button type="button" id="test">测试</button>
         <button type="submit" class="primary">保存</button>
       </div>
       <div id="msg"></div>

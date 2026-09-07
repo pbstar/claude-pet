@@ -117,6 +117,7 @@ src-tauri/         # Rust 壳 + tauri.conf.json + Info.plist + hook.sh（内嵌�
 1. 右键螃蟹 → 模型管理 → 填写表单保存。每条条目 = 一条线路（端点 + Token + 目标模型）：
    - **上游格式**：`openai`（Chat Completions 端点，填 OpenAI 根地址）或 `anthropic`（Anthropic Messages 端点，填 `ANTHROPIC_BASE_URL` 形态地址）
    - **模型名必填**：CLI 发来的 claude-* 角色模型名统一替换为它
+   - 保存前可点「测试」：用表单当前值向上游打一发最小请求，验证端点/Token/模型名连通性
 2. 右键螃蟹 → 点选条目即切换，下一条消息即时生效，无需重启任何应用
 
 ## 卸载

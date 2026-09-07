@@ -87,6 +87,28 @@ function resetForm(): void {
 
 $<HTMLButtonElement>("#cancel").addEventListener("click", resetForm);
 
+// 测试连通性：用表单当前值（不要求已保存），结果复用 #msg 展示
+$<HTMLButtonElement>("#test").addEventListener("click", (e) => {
+  e.preventDefault(); // 防止在 form 内触发 submit
+  void (async () => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = "测试中…";
+    msgEl.className = "";
+    msgEl.textContent = "";
+    const result = await invoke<string>("test_model", {
+      format: $<HTMLSelectElement>("#format").value,
+      baseUrl: $<HTMLInputElement>("#baseUrl").value,
+      token: $<HTMLInputElement>("#token").value,
+      model: $<HTMLInputElement>("#model").value,
+    }).catch((err) => `失败：${String(err)}`);
+    msgEl.className = result.startsWith("连通成功") ? "ok" : "";
+    msgEl.textContent = result;
+    btn.disabled = false;
+    btn.textContent = "测试";
+  })();
+});
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   void (async () => {

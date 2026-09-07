@@ -194,6 +194,18 @@ fn proxy_status() -> bool {
     proxy::is_running()
 }
 
+// 管理弹窗「测试」：用表单当前值探测上游连通性（不落盘）
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn test_model(
+    format: models::UpstreamFormat,
+    baseUrl: String,
+    token: String,
+    model: String,
+) -> Result<String, String> {
+    proxy::check_connectivity(format, baseUrl, token, model).await
+}
+
 // 菜单右键触发重试绑定（端口空出来后，无需重启 pet 即可恢复）
 // 绑定成功时补做一次配置校正——首启绑定失败时配置没写，这里兜底
 #[tauri::command]
@@ -266,6 +278,7 @@ fn main() {
             delete_model,
             switch_model,
             proxy_status,
+            test_model,
             retry_proxy,
             open_manager
         ])

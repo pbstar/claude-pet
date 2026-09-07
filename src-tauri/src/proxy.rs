@@ -419,6 +419,87 @@ fn sse_response(frames: Vec<Result<String, std::io::Error>>) -> Response {
         .unwrap()
 }
 
+// ─────────────────────────── 连通性测试 ───────────────────────────
+
+// 管理弹窗「测试」按钮：用表单当前值（不落盘、不影响 active）按正式转发同款
+// URL 拼接与鉴权头打一发最小对话请求。2xx 即连通；尽力提取应答文本片段，
+// 证明上游真的能出内容（只测 TCP/域名会漏掉 token 错、模型名错这类问题）
+pub async fn check_connectivity(
+    format: UpstreamFormat,
+    base_url: String,
+    token: String,
+    model: String,
+) -> Result<String, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    let token = token.trim();
+    let model = model.trim();
+    if base.is_empty() || token.is_empty() || model.is_empty() {
+        return Err("Base URL、Token、模型名需先填写".into());
+    }
+
+    // 独立 client：带总超时，避免测试按钮挂在无超时的共享 client 上长时间无反馈
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let ping = json!({"role": "user", "content": "ping"});
+    let (url, body) = match format {
+        // baseUrl 为 ANTHROPIC_BASE_URL 形态，追加 /v1/messages（同 forward_anthropic）
+        UpstreamFormat::Anthropic => (
+            format!("{base}/v1/messages"),
+            json!({"model": model, "max_tokens": 8, "messages": [ping]}),
+        ),
+        // baseUrl 为 Chat Completions 根地址（同 forward_openai）
+        UpstreamFormat::Openai => (
+            format!("{base}/chat/completions"),
+            json!({"model": model, "max_tokens": 8, "messages": [ping], "stream": false}),
+        ),
+    };
+
+    let mut req = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"));
+    if matches!(format, UpstreamFormat::Anthropic) {
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+
+    let started = std::time::Instant::now();
+    let resp = match req.json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => return Err(format!("请求失败：{e}")),
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    let ms = started.elapsed().as_millis();
+
+    if !status.is_success() {
+        return Err(format!("上游返回 {status}（{ms}ms）：{}", truncate(text.trim(), 160)));
+    }
+    // 回包尽力解出应答片段；解析不出（如推理模型吞掉 max_tokens）只报状态
+    let reply = serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+        let s = match format {
+            UpstreamFormat::Anthropic => v["content"][0]["text"].as_str(),
+            UpstreamFormat::Openai => v["choices"][0]["message"]["content"].as_str(),
+        };
+        s.map(str::to_string).filter(|s| !s.trim().is_empty())
+    });
+    Ok(match reply {
+        Some(s) => format!("连通成功（{ms}ms），应答「{}」", truncate(s.trim(), 24)),
+        None => format!("连通成功（HTTP {status}，{ms}ms）"),
+    })
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
 // 上游错误体翻译为 Anthropic 错误结构，保留状态码（CLI 重试逻辑依赖，4.4）
 fn upstream_error_response(status: u16, message: String) -> Response {
     let typ = match status {
