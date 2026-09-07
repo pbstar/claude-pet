@@ -1,8 +1,6 @@
 # Claude Pet 🦀
 
-Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小螃蟹，Claude 工作时它横着走，等你授权时定住举 ❗，空闲时趴下变半透明。
-
-灵感来自 [claude-status-bar](https://github.com/m1ckc3s/claude-status-bar)——菜单栏图标只有 18pt 不显眼，这个项目把它放大成桌面上的一块活物。
+Claude Code 桌面指示灯（桌宠）+ 本地模型代理：一只悬浮在桌面上的像素小螃蟹，Claude 工作时它横着走，等你授权时定住举 ❗，空闲时趴下变半透明；同时内置本地代理（127.0.0.1:15721），右键即可在多条模型线路间一键切换，Claude Code 与 Claude Desktop 共用。
 
 ## 特性
 
@@ -11,7 +9,12 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
   - 🚶 走路 —— Claude 正在思考 / 调用工具（20 帧 @12.5fps）
   - ⚠️ 举 ❗ —— 等待你的权限确认
   - 😴 趴下 —— 空闲 / 完成（半透明）
-- **轻量**：Tauri v2 + 系统 WKWebView，不捆绑 Chromium；产物 ~9.6MB
+- **本地模型代理**：
+  - 单端口 `127.0.0.1:15721`，Claude Code（`/v1/messages`）与 Claude Desktop（`/claude-desktop/*`）共用
+  - 右键菜单列出模型条目，点击即切换，**下一条消息即时生效**，无需重启任何应用
+  - 双格式上游：条目逐个配置 `anthropic`（换头直通）或 `openai`（协议转换，含 SSE 流式翻译）
+  - 「模型管理」小窗做条目增删改
+- **轻量**：Tauri v2 + 系统 WKWebView，不捆绑 Chromium
 - **自带数据源**：极简 shell hooks（不依赖 claude-status-bar，可独立工作）
 - **位置记忆**：拖动位置自动记住，重启还原
 - **右键退出**：右键菜单退出应用
@@ -20,9 +23,10 @@ Claude Code 桌面指示灯（桌宠）：一只悬浮在桌面上的像素小�
 
 | 层 | 选型 |
 |---|---|
-| 桌面壳 | Tauri v2（Rust 仅作编译壳） |
+| 桌面壳 | Tauri v2（Rust 壳 + axum 本地代理） |
 | 应用逻辑 | TypeScript（状态机、轮询、渲染） |
 | 数据源 | 纯 shell hooks（`~/.claude/claude-pet/`） |
+| 模型配置 | `~/.claude/claude-pet/models.json`（600 权限，原子写） |
 
 ## 构建与安装
 
@@ -66,11 +70,25 @@ Stop                        → done       │  ├─ poller.ts
 SessionEnd                  → 清理       │  └─ renderer.ts
         ↓ 原子写                            ↓
 ~/.claude/claude-pet/<session_id>.json   三态渲染（走/❗/趴）
+
+Claude Code / Claude Desktop                上游线路
+        │ ANTHROPIC_BASE_URL / 3p gateway
+        ▼
+proxy.rs (axum, 127.0.0.1:15721)
+  · /v1/messages        ← Code
+  · /claude-desktop/*   ← Desktop（token 校验）
+  · 按 active 条目 format 分流：
+    anthropic → 换头 + 模型替换后直通
+    openai    → Anthropic⇄OpenAI 双向协议翻译（SSE 逐块状态机）
+        ↓
+~/.claude/claude-pet/models.json 的 active 条目 → 上游端点
 ```
 
 - hooks 用「tmp + rename」原子写，读不到半截 JSON
 - 超时兜底：working 超 15 分钟、permission 超 2 小时自动归为休息（hook 进程被强杀时不冻结）
 - 聚合优先级：任意 `permission` > 任意 `working` > `rest`（等授权的会话永不被工作中掩盖）
+- 代理每请求现读 models.json 取 active 条目：换线路对下一个请求即时生效，跑着的流不断
+- 模型替换：claude-* 角色模型名固定替换为条目目标模型；`supports1m` 控制是否放行 `[1m]` 后缀与 context-1m beta 头
 
 ## 目录结构
 
@@ -79,21 +97,42 @@ src/               # TS 业务逻辑
   state.ts         # 纯函数：解析/超时/聚合
   poller.ts        # 轮询调度
   renderer.ts      # 三态渲染
+  menu.ts          # 右键菜单（动态模型条目）
+  manager.ts       # 模型管理窗逻辑
   main.ts          # 装配
+manager.html       # 模型管理小窗（第二个 WebView）
 public/crab/       # 20 帧螃蟹素材（自 claude-status-bar 导出）
 src-tauri/         # Rust 壳 + tauri.conf.json + Info.plist + hook.sh（内嵌）
+  src/proxy.rs     # axum 代理：路由、anthropic 直通管道
+  src/convert.rs   # openai 管道：Anthropic⇄OpenAI 协议转换 + SSE 状态机
+  src/models.rs    # models.json 读写 + settings.json 校正
+  src/desktop_profile.rs  # Desktop 3p profile 写入与回滚
 ```
+
+## 添加模型线路
+
+1. 右键螃蟹 → 模型管理 → 填写表单保存。每条条目 = 一条线路（端点 + Token + 目标模型）：
+   - **上游格式**：`openai`（Chat Completions 端点，填 OpenAI 根地址）或 `anthropic`（Anthropic Messages 端点，填 `ANTHROPIC_BASE_URL` 形态地址）
+   - **模型名必填**：CLI 发来的 claude-* 角色模型名统一替换为它
+2. 右键螃蟹 → 点选条目即切换，下一条消息即时生效，无需重启任何应用
 
 ## 卸载
 
 ```bash
-rm -rf ~/.claude/claude-pet   # 1. 删除状态目录与 hook 脚本
-# 2. 删除 ~/.claude/settings.json 里含 ".claude/claude-pet" 的 hook 命令
-# 3. 把 ClaudePet.app 拖进废纸篓
+rm -rf ~/.claude/claude-pet   # 1. 删除状态目录、hook 脚本与 models.json
+# 2. 删除 ~/.claude/settings.json 里含 ".claude/claude-pet" 的 hook 命令，
+#    以及 env.ANTHROPIC_BASE_URL / env.ANTHROPIC_AUTH_TOKEN 两个键（如不再走其他代理）
+# 3. 还原 Claude Desktop：删除 ~/Library/Application Support/Claude-3p/configLibrary/
+#    里名为 00000000-0000-4000-8000-000000157210.json 的 profile 与 _meta.json 中对应条目，
+#    两份 claude_desktop_config.json 的 deploymentMode 改回 "1p"（如需切回官方登录）
+# 4. 把 ClaudePet.app 拖进废纸篓
 ```
 
 > 首次自动安装时已备份原 `settings.json` 到 `settings.json.bak-claude-pet`，可用于恢复。
+> 注意：卸载 pet 后 Claude Code 会断连（`ANTHROPIC_BASE_URL` 指向已关闭的代理），需按上面第 2 步清理。
 
-## 版权说明
+## 版权与致谢
 
-螃蟹素材来自 claude-status-bar 的 `CrabFrames.swift`（MIT 协议，代码部分）；螃蟹形象是 Anthropic 的 Clawd，仅个人本地使用，未获商标授权。
+- 灵感来自 [claude-status-bar](https://github.com/m1ckc3s/claude-status-bar)——菜单栏图标只有 18pt 不显眼，这个项目把它放大成桌面上的一块活物
+- 螃蟹素材来自 claude-status-bar 的 `CrabFrames.swift`（MIT 协议，代码部分）；螃蟹形象是 Anthropic 的 Clawd，仅个人本地使用，未获商标授权
+- 本地模型代理的思路参考了 [cc-switch](https://github.com/farion1231/cc-switch)：它验证了单端口本地代理同时服务 Claude Code 与 Claude Desktop 的可行性，本项目把切换语义简化为一次 activeId 翻转
