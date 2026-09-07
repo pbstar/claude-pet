@@ -28,16 +28,25 @@ function turnDone(s: RawSession): boolean {
 }
 
 export function effectiveState(s: RawSession, now: number): string {
-  if (s.state === "thinking" || s.state === "tool") {
-    if (s.lastTurnLine.includes(INTERRUPT_MARKER)) return "rest";
-    // Stop hook 没落盘（hooks 失效）但 CLI 已答完本轮 → 休息
-    if (turnDone(s)) return "rest";
-    // hook 冻结但 transcript 仍在刷新 → 工作中（覆盖 15 分钟超时，长任务不误判休息）
-    if (transcriptLive(s, now)) return s.state;
+  // permission 解冻：批准后 transcript 必然继续写入（mtime > ts），但桌面端不发 PostToolUse、
+  // 无人改写状态文件 → permission 会冻结成 alert。按工作中重新解析，走下方兜底链
+  const st = s.state === "permission" && s.transcriptMtime > s.ts ? "thinking" : s.state;
+
+  if (st === "thinking" || st === "tool") {
+    // transcript 兜底仅在 hook 信号已过期（transcript 比状态文件新）时生效。
+    // Sending/Waiting 阶段尾部仍是上一轮内容（end_turn/中断标记），而 hook 刚落盘的
+    // thinking 是最新事实，不能被旧尾部推翻（否则螃蟹在发送窗口误判休息、定住不动）
+    if (s.transcriptMtime > s.ts) {
+      if (s.lastTurnLine.includes(INTERRUPT_MARKER)) return "rest";
+      // Stop hook 没落盘（hooks 失效）但 CLI 已答完本轮 → 休息
+      if (turnDone(s)) return "rest";
+      // hook 冻结但 transcript 仍在刷新 → 工作中（覆盖 15 分钟超时，长任务不误判休息）
+      if (transcriptLive(s, now)) return st;
+    }
     if (now - s.ts > WORKING_TIMEOUT) return "rest";
-    return s.state;
+    return st;
   }
-  if (s.state === "permission") {
+  if (st === "permission") {
     return now - s.ts > PERMISSION_TIMEOUT ? "rest" : "permission";
   }
   // done/idle/未知：hooks 死后用户又发了新消息（transcript 比状态文件新、未答完、仍在刷新）

@@ -48,9 +48,12 @@ fn read_sessions() -> Vec<Session> {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                     let state = v["state"].as_str().unwrap_or("").to_string();
                     let transcript = v["transcript"].as_str().unwrap_or("");
-                    // permission 态不需要 transcript 信号；其余状态读尾部+mtime
-                    // （working 态用于 Esc 中断检测，非 permission 态用于 TS 端活跃度兜底/复活判断）
-                    let (last_turn_line, transcript_mtime) = if state != "permission" && !transcript.is_empty() {
+                    // 所有状态都读尾部+mtime：working 态用于 Esc 中断检测与活跃度兜底/复活判断；
+                    // permission 态需要 mtime —— 批准后 transcript 继续写入（mtime > ts）即解冻，
+                    // 否则桌面端不发 PostToolUse、无人改写状态文件，alert 会永久冻结
+                    let (last_turn_line, transcript_mtime) = if transcript.is_empty() {
+                        (String::new(), 0)
+                    } else {
                         (
                             last_turn_line(transcript),
                             std::fs::metadata(transcript)
@@ -60,8 +63,6 @@ fn read_sessions() -> Vec<Session> {
                                 })
                                 .unwrap_or(0),
                         )
-                    } else {
-                        (String::new(), 0)
                     };
                     out.push(Session {
                         state,
