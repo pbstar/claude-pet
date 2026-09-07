@@ -86,6 +86,8 @@ proxy.rs (axum, 127.0.0.1:15721)
 
 - hooks 用「tmp + rename」原子写，读不到半截 JSON
 - 超时兜底：working 超 15 分钟、permission 超 2 小时自动归为休息（hook 进程被强杀时不冻结）
+- transcript 活跃度兜底：CLI 在沙箱外实时写 transcript jsonl，pet 轮询时以它 mtime ≤120s 判会话仍在推进——覆盖桌面端（Claude App）不触发工具类 hook、hook 写盘被沙箱拦截等 hooks 信号失效场景；尾部出现 `stop_reason:end_turn` 则即使状态文件还停在 working 也归为休息
+- hooks 自愈：外部程序（实测 Claude Desktop 改设置）会整键丢弃 settings.json 里的 hooks，pet 每 5s 节流校验一次，丢失即自动重装
 - 聚合优先级：任意 `permission` > 任意 `working` > `rest`（等授权的会话永不被工作中掩盖）
 - 代理每请求现读 models.json 取 active 条目：换线路对下一个请求即时生效，跑着的流不断
 - 模型替换：claude-* 角色模型名（及 Desktop 选择器写死的 `claude-custom` 哨兵名）固定替换为条目目标模型；`supports1m` 控制是否放行 `[1m]` 后缀与 context-1m beta 头

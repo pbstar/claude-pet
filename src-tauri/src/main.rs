@@ -21,11 +21,16 @@ struct Session {
     state: String,
     ts: u64,
     last_turn_line: String,
+    // transcript jsonl 的 mtime（秒）；0 = 读不到。CLI 在沙箱外实时写它，
+    // 是 hook 冻结/丢失时的活跃度兜底信号（TS 端 state.ts 使用）
+    transcript_mtime: u64,
 }
 
 // 读取 ~/.claude/claude-pet/*.json，返回原始会话列表；聚合与 FSM 在 TS 端完成。
+// 每次调用顺带节流校验 settings.json hooks（外部程序可能整键丢弃，见 maybe_verify_hooks）
 #[tauri::command]
 fn read_sessions() -> Vec<Session> {
+    maybe_verify_hooks();
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = PathBuf::from(home).join(".claude/claude-pet");
     let mut out = Vec::new();
@@ -43,16 +48,26 @@ fn read_sessions() -> Vec<Session> {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                     let state = v["state"].as_str().unwrap_or("").to_string();
                     let transcript = v["transcript"].as_str().unwrap_or("");
-                    // 仅工作态需要读 transcript 尾部（Esc 中断检测），空闲态省掉这次 IO
-                    let last_turn_line = if state == "thinking" || state == "tool" {
-                        last_turn_line(transcript)
+                    // permission 态不需要 transcript 信号；其余状态读尾部+mtime
+                    // （working 态用于 Esc 中断检测，非 permission 态用于 TS 端活跃度兜底/复活判断）
+                    let (last_turn_line, transcript_mtime) = if state != "permission" && !transcript.is_empty() {
+                        (
+                            last_turn_line(transcript),
+                            std::fs::metadata(transcript)
+                                .and_then(|m| m.modified())
+                                .map(|t| {
+                                    t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+                                })
+                                .unwrap_or(0),
+                        )
                     } else {
-                        String::new()
+                        (String::new(), 0)
                     };
                     out.push(Session {
                         state,
                         ts: v["ts"].as_u64().unwrap_or(0),
                         last_turn_line,
+                        transcript_mtime,
                     });
                 }
             }
@@ -202,6 +217,8 @@ fn open_manager(app: tauri::AppHandle) {
 }
 
 // 管理小窗：按需创建第二个 WebView 小窗，关即销毁
+// always_on_top 必开：本应用是 LSUIElement 后台应用，无法成为活动应用，
+// 普通窗口即使 set_focus 也压在前台软件的窗口后面（表现为"弹窗没出现"）
 fn open_manager_window(app: &tauri::AppHandle) {
     use tauri::WebviewUrl;
     if let Some(win) = app.get_webview_window("manager") {
@@ -216,6 +233,8 @@ fn open_manager_window(app: &tauri::AppHandle) {
     .title("模型管理")
     .inner_size(420.0, 560.0)
     .resizable(false)
+    .always_on_top(true)
+    .focused(true)
     .build();
 }
 
@@ -267,6 +286,54 @@ fn ensure_models_file() {
 
 fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+// ── hooks 自愈 ──
+// 外部程序（实测 Claude Desktop 改设置时）会按自己认识的配置子集重写 settings.json，
+// 整键丢弃不认识的 hooks。read_sessions 每 5s 节流校验一次：发现 pet hooks 不在就重装
+// （ensure_hooks_installed 幂等）。正在运行的会话可能不热加载，新会话立即恢复。
+static HOOKS_CHECK_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn maybe_verify_hooks() {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last = HOOKS_CHECK_TS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 5 {
+        return;
+    }
+    HOOKS_CHECK_TS.store(now, Ordering::Relaxed);
+    if pet_hooks_present() {
+        return;
+    }
+    eprintln!("claude-pet: hooks missing from settings.json, reinstalling");
+    ensure_hooks_installed();
+}
+
+// settings.json 的 hooks 里任一 command 引用 pet 目录即视为在位
+fn pet_hooks_present() -> bool {
+    let path = dirs_home().join(".claude/settings.json");
+    let Ok(s) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return false;
+    };
+    let Some(events) = v["hooks"].as_object() else {
+        return false;
+    };
+    events.values().filter_map(|a| a.as_array()).flatten().any(|entry| {
+        entry["hooks"]
+            .as_array()
+            .map(|hs| {
+                hs.iter().any(|h| {
+                    h["command"].as_str().map_or(false, |c| c.contains(".claude/claude-pet"))
+                })
+            })
+            .unwrap_or(false)
+    })
 }
 
 // 首次启动自安装：写 hook.sh 到 ~/.claude/claude-pet/，并把 7 个事件 hook 合并进 settings.json
