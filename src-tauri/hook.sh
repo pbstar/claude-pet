@@ -1,6 +1,6 @@
 #!/bin/bash
 # claude-pet 状态 hook（极简，纯 shell，不依赖 node）
-# 事件参数由安装器在 settings.json 里指定；Claude Code 的 hook JSON 从 stdin 传入。
+# 事件参数由安装器在 settings.json 里指定；Claude 的 hook JSON 从 stdin 传入。
 # usage: hook.sh <thinking|tool|permission|done|notify|clean>
 #   - thinking/tool/permission/done：写会话状态文件
 #   - notify：仅当通知是权限提示时才写 permission（过滤 idle_prompt 等无关通知）
@@ -22,7 +22,7 @@ case "$1" in
     exit 0
     ;;
   notify)
-    # 仅权限类通知（CLI 路径）写入状态；其余通知忽略
+    # 仅权限类通知写入状态；其余通知忽略
     case "$input" in
       *permission*|*approve*|*allow*) ;;
       *) exit 0 ;;

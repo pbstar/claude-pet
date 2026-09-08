@@ -1,18 +1,21 @@
-// Anthropic Messages ⇄ OpenAI Chat Completions 协议转换（管道 B，4.1/4.2 节）
-// 覆盖 CLI/Desktop 实际用到的子集：未知请求字段丢弃、未知响应块跳过，不崩。
+// Anthropic Messages ⇄ OpenAI Chat Completions 协议转换（请求侧 + 非流式响应）
+// 覆盖 Code tab 实际用到的子集：未知请求字段丢弃、未知响应块跳过，不崩。
+// 流式响应翻译见 stream.rs。
 use serde_json::{json, Value};
 
 // ─────────────────────────── 请求：Anthropic → OpenAI ───────────────────────────
 
 pub fn convert_request(body: &Value, model: &str) -> Value {
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let mut out = json!({
-        "model": model,
-        "stream": stream,
-    });
+    let mut out = json!({"model": model, "stream": stream});
 
-    if let Some(mt) = body.get("max_tokens").and_then(Value::as_u64) {
-        out["max_tokens"] = json!(mt);
+    // o 系列（o1/o3/o4-mini…）只认 max_completion_tokens，发 max_tokens 会被拒
+    if let Some(mt) = body.get("max_tokens") {
+        if is_o_series(model) {
+            out["max_completion_tokens"] = mt.clone();
+        } else {
+            out["max_tokens"] = mt.clone();
+        }
     }
     for (src, dst) in [("temperature", "temperature"), ("top_p", "top_p")] {
         if let Some(v) = body.get(src) {
@@ -25,6 +28,16 @@ pub fn convert_request(body: &Value, model: &str) -> Value {
         if !v.is_empty() {
             out["stop"] = Value::Array(v.clone());
         }
+    }
+    // thinking → reasoning_effort：只对支持该参数的模型注入，否则上游报未知字段
+    if supports_reasoning_effort(model) {
+        if let Some(effort) = resolve_reasoning_effort(body) {
+            out["reasoning_effort"] = json!(effort);
+        }
+    }
+    // 流式必须显式声明 include_usage，否则上游 SSE 不回 usage，token 统计全为 0
+    if stream {
+        out["stream_options"] = json!({"include_usage": true});
     }
 
     // 顶层 system（string 或 block 数组）→ 一条 system 消息置于最前
@@ -39,7 +52,7 @@ pub fn convert_request(body: &Value, model: &str) -> Value {
     }
     out["messages"] = Value::Array(msgs);
 
-    // tools：input_schema → parameters
+    // tools：input_schema → parameters（根 schema 补 object 类型，否则严格上游拒收）
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
         let converted: Vec<Value> = tools
             .iter()
@@ -50,7 +63,7 @@ pub fn convert_request(body: &Value, model: &str) -> Value {
                     "function": {
                         "name": name,
                         "description": t.get("description").cloned().unwrap_or(json!("")),
-                        "parameters": t.get("input_schema").cloned().unwrap_or(json!({"type":"object"})),
+                        "parameters": clean_schema(t.get("input_schema").cloned().unwrap_or(json!({"type":"object"}))),
                     }
                 }))
             })
@@ -74,20 +87,103 @@ pub fn convert_request(body: &Value, model: &str) -> Value {
 }
 
 fn system_text(system: Option<&Value>) -> Option<String> {
-    match system? {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(blocks) => {
-            let texts: Vec<&str> = blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect();
-            if texts.is_empty() { None } else { Some(texts.join("\n")) }
+    let texts: Vec<String> = match system? {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect(),
+        _ => return None,
+    };
+    // 客户端会在 system 开头塞一行 x-anthropic-billing-header，其 cch= 每次请求都变，
+    // 不剥离会让上游前缀缓存永远不命中（cc-switch #2350 同款处理）
+    let joined: Vec<&str> = texts.iter().map(|t| strip_billing_header(t)).filter(|t| !t.is_empty()).collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("\n"))
+    }
+}
+
+fn strip_billing_header(text: &str) -> &str {
+    const PREFIX: &str = "x-anthropic-billing-header:";
+    if !text.starts_with(PREFIX) {
+        return text;
+    }
+    match text.find(['\n', '\r']) {
+        Some(end) => text[end..].trim_start_matches(['\n', '\r']),
+        None => "",
+    }
+}
+
+// 根 schema 缺 type 时补 object（OpenAI 要求），并去掉上游普遍不认的 format:"uri"
+fn clean_schema(schema: Value) -> Value {
+    clean_schema_inner(schema, true)
+}
+
+fn clean_schema_inner(mut schema: Value, is_root: bool) -> Value {
+    let Some(obj) = schema.as_object_mut() else {
+        return schema;
+    };
+    if is_root && !obj.contains_key("type") {
+        obj.insert("type".to_string(), json!("object"));
+        obj.entry("properties").or_insert_with(|| json!({}));
+    }
+    if obj.get("format").and_then(Value::as_str) == Some("uri") {
+        obj.remove("format");
+    }
+    if let Some(props) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+        for (_, v) in props.iter_mut() {
+            *v = clean_schema_inner(v.clone(), false);
         }
+    }
+    if let Some(items) = obj.get_mut("items") {
+        *items = clean_schema_inner(items.clone(), false);
+    }
+    schema
+}
+
+// o 系列推理模型：o1 / o3 / o4-mini …
+fn is_o_series(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.len() > 1 && m.starts_with('o') && m.as_bytes()[1].is_ascii_digit()
+}
+
+// 支持 reasoning_effort 的模型：o 系列 + gpt-5 及以后
+fn supports_reasoning_effort(model: &str) -> bool {
+    let m = model.to_lowercase();
+    is_o_series(&m)
+        || m.strip_prefix("gpt-")
+            .and_then(|r| r.chars().next())
+            .is_some_and(|c| c.is_ascii_digit() && c >= '5')
+}
+
+// Anthropic thinking 预算 → OpenAI reasoning_effort。
+// 优先取显式 output_config.effort；否则按 budget_tokens 分档，未知值不注入
+fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
+    if let Some(effort) = body.pointer("/output_config/effort").and_then(Value::as_str) {
+        return match effort {
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            "max" => Some("xhigh"),
+            _ => None,
+        };
+    }
+    let thinking = body.get("thinking")?;
+    match thinking.get("type").and_then(Value::as_str) {
+        Some("adaptive") => Some("xhigh"),
+        Some("enabled") => match thinking.get("budget_tokens").and_then(Value::as_u64) {
+            Some(b) if b < 4_000 => Some("low"),
+            Some(b) if b < 16_000 => Some("medium"),
+            _ => Some("high"),
+        },
         _ => None,
     }
 }
 
-// 逐条转换消息；OpenAI 不允许相邻同角色 → 连续同角色合并（4.1）
+// 逐条转换消息；OpenAI 不允许相邻同角色 → 连续同角色合并
 fn convert_message(m: &Value, out: &mut Vec<Value>) {
     let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
     let blocks = m.get("content");
@@ -117,7 +213,6 @@ fn convert_message(m: &Value, out: &mut Vec<Value>) {
                         "tool_call_id": b.get("tool_use_id").cloned().unwrap_or(json!("")),
                         "content": content,
                     }));
-                    // 刚 push 的 tool 消息与后续 text 块生成的 user 消息角色不同，无需合并
                 }
                 Some("image") => {
                     if let Some(img) = convert_image(b) {
@@ -227,12 +322,17 @@ fn merge_or_push(out: &mut Vec<Value>, msg: Value) {
     out.push(msg);
 }
 
-// ─────────────────────────── 响应：OpenAI → Anthropic ───────────────────────────
+// ─────────────────────────── 响应：OpenAI → Anthropic（非流式） ───────────────────────────
 
-// 非流式：OpenAI Chat JSON → Anthropic Messages JSON（4.2）
 pub fn convert_response(resp: &Value, src_model: &str) -> Value {
     let mut content: Vec<Value> = Vec::new();
     if let Some(msg) = resp.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message")) {
+        // DeepSeek/MiMo 等把思考放在 message.reasoning_content
+        if let Some(t) = msg.get("reasoning_content").and_then(Value::as_str) {
+            if !t.is_empty() {
+                content.push(json!({"type": "thinking", "thinking": t}));
+            }
+        }
         if let Some(t) = msg.get("content").and_then(Value::as_str) {
             if !t.is_empty() {
                 content.push(json!({"type": "text", "text": t}));
@@ -268,190 +368,53 @@ pub fn convert_response(resp: &Value, src_model: &str) -> Value {
     })
 }
 
-fn map_usage(u: Option<&Value>) -> Value {
-    let input = u.and_then(|u| u.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0);
-    let output = u.and_then(|u| u.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0);
-    json!({"input_tokens": input, "output_tokens": output})
+// OpenAI usage → Anthropic usage。prompt_tokens 含缓存命中，Anthropic 的
+// input_tokens 不含——三桶互斥（input + cache_read + cache_creation == prompt），
+// 不减会让缓存被重复计入 input
+pub(crate) fn map_usage(u: Option<&Value>) -> Value {
+    let Some(u) = u else {
+        return json!({"input_tokens": 0, "output_tokens": 0});
+    };
+    let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cached = cache_read_tokens(u);
+    let creation = cache_write_tokens(u);
+    let mut v = json!({
+        "input_tokens": prompt.saturating_sub(cached).saturating_sub(creation),
+        "output_tokens": output,
+    });
+    if cached > 0 {
+        v["cache_read_input_tokens"] = json!(cached);
+    }
+    if creation > 0 {
+        v["cache_creation_input_tokens"] = json!(creation);
+    }
+    v
 }
 
-fn map_stop_reason(r: &str) -> &'static str {
+// 缓存命中：直传字段优先（部分兼容上游直接给 Anthropic 形态），否则 OpenAI 嵌套 details
+pub(crate) fn cache_read_tokens(u: &Value) -> u64 {
+    u.get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| u.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+pub(crate) fn cache_write_tokens(u: &Value) -> u64 {
+    u.get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            u.pointer("/prompt_tokens_details/cache_write_tokens")
+                .or_else(|| u.pointer("/input_tokens_details/cache_write_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn map_stop_reason(r: &str) -> &'static str {
     match r {
-        "tool_calls" => "tool_use",
+        "tool_calls" | "function_call" => "tool_use",
         "length" => "max_tokens",
         _ => "end_turn",
     }
 }
-
-// 上游（openai）错误体 → Anthropic 错误结构，保留状态码（4.4）
-// （入口在 proxy.rs::upstream_error_response，此处仅导出类型映射供其复用）
-
-// ─────────────────────────── 流式：OpenAI chunks → Anthropic SSE ───────────────────────────
-// 状态机维护「当前开着的 block」，保证 start/stop 配对——CLI 对未闭合 block 会报错（4.2）
-
-#[derive(PartialEq)]
-enum OpenBlock {
-    None,
-    Text,
-    Tool(usize), // OpenAI tool_calls 的 index
-}
-
-pub struct StreamTranslator {
-    src_model: String,
-    block_index: u64,     // 已分配的 Anthropic content block 序号
-    open: OpenBlock,      // 当前开着的 block
-    emitted_any: bool,    // 是否产出过任何 content（空流兜底用）
-    output_tokens: u64,
-}
-
-impl StreamTranslator {
-    pub fn new(src_model: String) -> Self {
-        Self { src_model, block_index: 0, open: OpenBlock::None, emitted_any: false, output_tokens: 0 }
-    }
-    // 流开头：message_start（content 尚为空，块随转换逐个出现）
-    pub fn start_events(&self) -> Vec<Value> {
-        vec![json!({
-            "type": "message_start",
-            "message": {
-                "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
-                "type": "message",
-                "role": "assistant",
-                "model": self.src_model,
-                "content": [],
-                "stop_reason": Value::Null,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            }
-        })]
-    }
-
-    // 喂一个 OpenAI chunk（data: JSON 部分），产出 0..n 个 Anthropic SSE 事件
-    pub fn feed(&mut self, chunk: &Value) -> Vec<Value> {
-        let mut events = Vec::new();
-        let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
-            // 带 usage 的终止 chunk（stream_options 时）：usage 累计，无内容事件
-            if let Some(u) = chunk.get("usage") {
-                self.output_tokens = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(self.output_tokens);
-            }
-            return events;
-        };
-
-        if let Some(delta) = choice.get("delta") {
-            // 文本增量
-            if let Some(t) = delta.get("content").and_then(Value::as_str) {
-                if !t.is_empty() {
-                    if self.open != OpenBlock::Text {
-                        self.close_block(&mut events);
-                        events.push(self.block_start(json!({"type": "text", "text": ""})));
-                        self.open = OpenBlock::Text;
-                    }
-                    self.emitted_any = true;
-                    events.push(json!({
-                        "type": "content_block_delta",
-                        "index": self.block_index - 1,
-                        "delta": {"type": "text_delta", "text": t},
-                    }));
-                }
-            }
-            // delta.reasoning_content（部分上游的思考字段）丢弃
-
-            // 工具调用分片：按 index 归组，首次出片开块，后续续片
-            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for call in calls {
-                    let idx = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                    if self.open != OpenBlock::Tool(idx) {
-                        self.close_block(&mut events);
-                        let name = call["function"]["name"].as_str().unwrap_or("");
-                        let id = call.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("callu_{:08x}", self.block_index));
-                        events.push(self.block_start(json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": {},
-                        })));
-                        self.open = OpenBlock::Tool(idx);
-                    }
-                    if let Some(args) = call["function"]["arguments"].as_str() {
-                        if !args.is_empty() {
-                            self.emitted_any = true;
-                            events.push(json!({
-                                "type": "content_block_delta",
-                                "index": self.block_index - 1,
-                                "delta": {"type": "input_json_delta", "partial_json": args},
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.close_block(&mut events);
-            self.output_tokens = choice
-                .get("usage")
-                .and_then(|u| u.get("completion_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(self.output_tokens);
-            let _ = fr; // stop_reason 在 finish() 里统一发出
-        }
-        events
-    }
-
-    // 流结束：空流补空 text block 兜底 + message_delta(stop_reason/usage) + message_stop
-    pub fn finish(&mut self, stop_reason: &str) -> Vec<Value> {
-        let mut events = Vec::new();
-        if !self.emitted_any {
-            events.push(self.block_start(json!({"type": "text", "text": ""})));
-            events.push(json!({
-                "type": "content_block_delta",
-                "index": self.block_index - 1,
-                "delta": {"type": "text_delta", "text": ""},
-            }));
-        }
-        self.close_block(&mut events);
-        events.push(json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": map_stop_reason(stop_reason), "stop_sequence": Value::Null},
-            "usage": {"output_tokens": self.output_tokens},
-        }));
-        events.push(json!({"type": "message_stop"}));
-        events
-    }
-
-    fn block_start(&mut self, content_block: Value) -> Value {
-        let ev = json!({
-            "type": "content_block_start",
-            "index": self.block_index,
-            "content_block": content_block,
-        });
-        self.block_index += 1;
-        ev
-    }
-
-    fn close_block(&mut self, events: &mut Vec<Value>) {
-        if self.open != OpenBlock::None {
-            events.push(json!({"type": "content_block_stop", "index": self.block_index - 1}));
-            self.open = OpenBlock::None;
-        }
-    }
-}
-// SSE 帧解析辅助：从缓冲区拆出「已完整」（以换行结尾）的 data: 行。
-// 返回 (data 负载列表, 已消费字节数)；不完整的尾行保留在缓冲区等下一块。
-// [DONE] 由调用方按返回的 String 判断。
-pub fn parse_sse_frames(buf: &str) -> (Vec<String>, usize) {
-    let mut events = Vec::new();
-    let mut consumed = 0;
-    for line in buf.split_inclusive('\n') {
-        if !line.ends_with('\n') {
-            break; // 尾行不完整：留给后续字节拼
-        }
-        if let Some(data) = line.trim_end_matches(['\n', '\r']).strip_prefix("data:") {
-            events.push(data.trim_start().to_string());
-        }
-        consumed += line.len();
-    }
-    (events, consumed)
-}
-
-// [DONE] 标记对应的 finish_reason
-pub const DONE_SENTINEL: &str = "[DONE]";

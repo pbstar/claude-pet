@@ -5,6 +5,28 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，菜单/安装包版本自动跟随）。
 
+## [未发布]
+
+### 变更
+
+- **仅支持 Claude Desktop 的 Code tab**：移除 Claude Code CLI 专用通路——代理去掉 `/v1/messages` 与 `/v1/messages/count_tokens` 两个入口（Code tab 经 Desktop 注入的 host-creds 走 `/claude-desktop/*`），不再向 `settings.json` 注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`
+- 精简代码与注释：删除失效的 `docs/ccswitch-replacement.md` 章节引用与冗余分支
+
+### 修复
+
+- **openai 管道对齐 cc-switch 转换语义**，修掉一批真实故障源：
+  - `[1m]` 后缀不再拼回模型名发给上游（仅用于驱动 `context-1m` beta 头）——上游普遍拒收该本地标记
+  - 工具块等 id + name 都到齐才 `content_block_start`，先到的 args 缓存；流尾对未凑齐的块补 late-start，保证 start/stop 严格配对（此前首片只带 name 时会开出无名工具块）
+  - SSE 字节流改为 `append_utf8_safe` 拼接，多字节 UTF-8 跨块截断不再整条流中断
+  - 流式请求注入 `stream_options.include_usage`；`message_delta` 去重并延迟到流尾发出，携带完整 usage（此前每遇 finish_reason 就发一次）
+  - `input_tokens` 扣除缓存命中（三桶互斥），补 `cache_read_input_tokens` / `cache_creation_input_tokens`
+  - `reasoning_content` / `reasoning` → `thinking` 块（此前直接丢弃）
+  - 请求侧补齐：o 系列模型改用 `max_completion_tokens`、thinking 预算映射 `reasoning_effort`、工具 schema 根节点补 `type: object`、system 首行 `x-anthropic-billing-header` 剥离
+
+### 重构
+
+- 流式翻译状态机从 `convert.rs` 拆到 `stream.rs`（含 8 项单元测试），`convert.rs` 只留请求侧与非流式响应转换
+
 ## [0.0.1] - 2026-09-08
 
 初版发布。

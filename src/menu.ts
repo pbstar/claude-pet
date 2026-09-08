@@ -63,7 +63,7 @@ async function buildMenu(): Promise<Menu> {
         text: m.name,
         checked: m.active,
         action: () => {
-          // 只改 models.json 的 activeId（第五节）；下次右键重建菜单刷新 ✓
+          // 只改 models.json 的 activeId；下次右键重建菜单刷新 ✓
           void invoke("switch_model", { id: m.id });
         },
       })

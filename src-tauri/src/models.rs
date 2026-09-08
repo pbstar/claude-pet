@@ -1,5 +1,4 @@
-// models.json 读写 + Claude Code settings.json 校正
-// 数据格式见 docs/ccswitch-replacement.md 第三节；activeId 即「切换」语义（第五节）
+// models.json 读写（activeId 即「切换」语义）
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,7 +25,7 @@ pub struct ModelEntry {
     #[serde(default)]
     pub base_url: String,
     pub token: String,
-    // 目标模型名：发来的 claude-* 角色模型名固定替换为它（4.3）
+    // 目标模型名：发来的 claude-* 角色模型名固定替换为它
     pub model: String,
     pub supports_1m: bool,
 }
@@ -79,7 +78,7 @@ impl ModelsState {
         &self.desktop_token
     }
 
-    // desktopToken 不存在则生成（六.2）
+    // desktopToken 不存在则生成
     pub fn ensure_token(&mut self) {
         if self.desktop_token.is_empty() {
             self.desktop_token = format!("pet-{}", uuid::Uuid::new_v4().simple());
@@ -157,55 +156,4 @@ fn models_path() -> PathBuf {
 
 fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
-// 首启（每次启动）校正 settings.json：指向本地代理，清理 cc-switch 遗留的模型别名键（4.4/六.3）
-pub fn ensure_code_settings() {
-    let settings_path = dirs_home().join(".claude/settings.json");
-    if !settings_path.exists() {
-        return;
-    }
-    let mut settings = match fs::read_to_string(&settings_path) {
-        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
-    };
-
-    let env = match settings.as_object_mut() {
-        Some(obj) => obj.entry("env").or_insert_with(|| serde_json::json!({})),
-        None => return,
-    };
-    let changed = {
-        let env = env.as_object_mut().unwrap();
-        let mut changed = false;
-        for (k, v) in [
-            ("ANTHROPIC_BASE_URL", PROXY_URL),
-            ("ANTHROPIC_AUTH_TOKEN", "PROXY_MANAGED"),
-        ] {
-            if env.get(k).and_then(|v| v.as_str()) != Some(v) {
-                env.insert(k.to_string(), serde_json::json!(v));
-                changed = true;
-            }
-        }
-        // 这些键会把请求钉死在旧模型上；模型替换统一在代理侧
-        for k in [
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-            "ANTHROPIC_DEFAULT_FABLE_MODEL",
-            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-            "ANTHROPIC_MODEL",
-            "CLAUDE_CODE_SUBAGENT_MODEL",
-        ] {
-            if env.remove(k).is_some() {
-                changed = true;
-            }
-        }
-        changed
-    };
-    if changed {
-        let _ = fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap());
-    }
 }

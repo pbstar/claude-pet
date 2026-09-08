@@ -11,6 +11,7 @@ mod convert;
 mod desktop_profile;
 mod models;
 mod proxy;
+mod stream;
 
 // 内嵌的 hook 脚本（编译期从 src-tauri/hook.sh 读入）
 const HOOK_SCRIPT: &str = include_str!("../hook.sh");
@@ -163,11 +164,10 @@ fn save_model(
         return Err("名称、Base URL、Token、模型名均为必填".into());
     }
     let mut state = models::ModelsState::load();
-    let new_id = state
+    state
         .upsert(id, name, format, base_url, token, model, supports1m)
         .ok_or_else(|| "条目不存在".to_string())?;
     state.save().map_err(|e| e.to_string())?;
-    let _ = new_id;
     Ok(())
 }
 
@@ -179,7 +179,7 @@ fn delete_model(id: String) -> Result<(), String> {
     Ok(())
 }
 
-// 右键菜单点条目 = 只改 activeId，一个原子写（第五节）
+// 右键菜单点条目 = 只改 activeId，一个原子写
 #[tauri::command]
 fn switch_model(id: String) -> Result<bool, String> {
     let mut state = models::ModelsState::load();
@@ -222,7 +222,6 @@ async fn retry_proxy() -> bool {
     }
     if proxy::spawn().await {
         ensure_models_file();
-        models::ensure_code_settings();
         desktop_profile::ensure_desktop_profile();
         true
     } else {
@@ -257,7 +256,7 @@ fn open_manager_window(app: &tauri::AppHandle) {
     .build();
 }
 
-// ── 启动装配（顺序见文档六：先绑端口，成功才写配置）──
+// ── 启动装配（先绑端口，成功才写配置）──
 
 fn main() {
     ensure_hooks_installed();
@@ -267,10 +266,8 @@ fn main() {
     let proxy_up = rt.block_on(proxy::spawn());
 
     if proxy_up {
-        // 顺序照文档六：models.json（含 token 生成）→ settings.json → Desktop profile
-        // （Desktop profile 依赖 token，必须在 models.json 之后）
+        // 顺序：models.json（含 token 生成）→ Desktop profile（依赖 token，必须在之后）
         ensure_models_file();
-        models::ensure_code_settings();
         desktop_profile::ensure_desktop_profile();
     } else {
         eprintln!("claude-pet: proxy not started, skip config sync (settings untouched)");
@@ -294,7 +291,7 @@ fn main() {
         .expect("error while running ClaudePet");
 }
 
-// models.json：不存在则建空列表；desktopToken 不存在则生成（六.2）
+// models.json：不存在则建空列表；desktopToken 不存在则生成
 fn ensure_models_file() {
     let dir = dirs_home().join(".claude/claude-pet");
     let _ = fs::create_dir_all(&dir);
