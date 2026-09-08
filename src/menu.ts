@@ -1,7 +1,15 @@
 // 右键菜单：原生系统菜单（muda）。原生菜单由 OS 绘制，不受窗口 112×80 边界裁剪，
 // 可从任意位置弹出并支持子菜单/勾选项，扩展菜单时直接往 items 数组加项即可
 // 模型条目每次右键动态重建（七）：✓ 标记 active，点击即切换
-import { Menu, MenuItem, CheckMenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
+import {
+  Menu,
+  MenuItem,
+  CheckMenuItem,
+  IconMenuItem,
+  NativeIcon,
+  PredefinedMenuItem,
+} from "@tauri-apps/api/menu";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 
 type ModelDto = {
@@ -11,15 +19,19 @@ type ModelDto = {
 };
 
 async function buildMenu(): Promise<Menu> {
-  const items: (MenuItem | CheckMenuItem | PredefinedMenuItem)[] = [];
+  const items: (MenuItem | CheckMenuItem | IconMenuItem | PredefinedMenuItem)[] = [];
 
-  // 状态项：代理运行中 :15721 / 代理未启动（七）；未启动时附一个重试项
-  const running = await invoke<boolean>("proxy_status").catch(() => false);
+  // 状态项：IconMenuItem + 系统原生状态圆点（绿=运行中，灰=未启动），
+  const [running, proxyAddr] = await Promise.all([
+    invoke<boolean>("proxy_status").catch(() => false),
+    invoke<string>("proxy_addr").catch(() => ""),
+  ]);
+  const port = proxyAddr.split(":").pop();
   items.push(
-    await MenuItem.new({
+    await IconMenuItem.new({
       id: "proxy-status",
-      // 原生菜单文本无法设文字颜色，用 emoji 圆点显示状态色（绿=运行中，灰=未启动）
-      text: running ? "🟢 代理运行中 :15721" : "⚪ 代理未启动",
+      text: running ? `代理运行中${port ? ` · 端口 ${port}` : ""}` : "代理未启动",
+      icon: running ? NativeIcon.StatusAvailable : NativeIcon.StatusNone,
       enabled: false,
     })
   );
@@ -75,6 +87,17 @@ async function buildMenu(): Promise<Menu> {
       action: () => {
         void invoke("quit");
       },
+    })
+  );
+
+  // 版本行：底部置灰（enabled:false 即灰色不可点），版本号取自 tauri.conf.json
+  items.push(await PredefinedMenuItem.new({ item: "Separator" }));
+  const version = await getVersion().catch(() => "");
+  items.push(
+    await MenuItem.new({
+      id: "version",
+      text: `ClaudePet v${version}`,
+      enabled: false,
     })
   );
 

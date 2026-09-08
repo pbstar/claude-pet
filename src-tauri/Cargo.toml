@@ -1,5 +1,6 @@
 [package]
 name = "claude-pet"
+# crate 版本仅内部元数据；应用/安装包版本号单一来源为根 package.json（tauri.conf.json 引用）
 version = "0.1.0"
 description = "Claude Code 桌面指示灯（桌宠）"
 edition = "2021"

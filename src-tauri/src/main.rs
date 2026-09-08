@@ -195,6 +195,12 @@ fn proxy_status() -> bool {
     proxy::is_running()
 }
 
+// 菜单状态项显示端口用：地址单一来源是 models::PROXY_ADDR，避免前端硬编码脱节
+#[tauri::command]
+fn proxy_addr() -> String {
+    models::PROXY_ADDR.to_string()
+}
+
 // 管理弹窗「测试」：用表单当前值探测上游连通性（不落盘）
 #[tauri::command]
 #[allow(non_snake_case)]
@@ -279,6 +285,7 @@ fn main() {
             delete_model,
             switch_model,
             proxy_status,
+            proxy_addr,
             test_model,
             retry_proxy,
             open_manager
