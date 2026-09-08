@@ -9,7 +9,6 @@ import {
   NativeIcon,
   PredefinedMenuItem,
 } from "@tauri-apps/api/menu";
-import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 
 type ModelDto = {
@@ -30,7 +29,7 @@ async function buildMenu(): Promise<Menu> {
   items.push(
     await IconMenuItem.new({
       id: "proxy-status",
-      text: running ? `代理运行中${port ? ` · 端口 ${port}` : ""}` : "代理未启动",
+      text: running ? `代理运行中${port ? ` · ${port}` : ""}` : "代理未启动",
       icon: running ? NativeIcon.StatusAvailable : NativeIcon.StatusNone,
       enabled: false,
     })
@@ -87,17 +86,6 @@ async function buildMenu(): Promise<Menu> {
       action: () => {
         void invoke("quit");
       },
-    })
-  );
-
-  // 版本行：底部置灰（enabled:false 即灰色不可点），版本号取自 tauri.conf.json
-  items.push(await PredefinedMenuItem.new({ item: "Separator" }));
-  const version = await getVersion().catch(() => "");
-  items.push(
-    await MenuItem.new({
-      id: "version",
-      text: `ClaudePet v${version}`,
-      enabled: false,
     })
   );
 
