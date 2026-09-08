@@ -154,6 +154,6 @@ fn models_path() -> PathBuf {
     dirs_home().join(".claude/claude-pet/models.json")
 }
 
-fn dirs_home() -> PathBuf {
+pub fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }

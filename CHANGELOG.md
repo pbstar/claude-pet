@@ -5,7 +5,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，菜单/安装包版本自动跟随）。
 
-## [未发布]
+## [0.0.2] - 2026-09-08
 
 ### 变更
 
@@ -25,7 +25,18 @@
 
 ### 重构
 
-- 流式翻译状态机从 `convert.rs` 拆到 `stream.rs`（含 8 项单元测试），`convert.rs` 只留请求侧与非流式响应转换
+- 流式翻译状态机从 `convert.rs` 拆到 `stream.rs`（含 10 项单元测试），`convert.rs` 只留请求侧与非流式响应转换
+- 代理去掉从未使用的 axum state 包装（`ProxyState` / `AppStore` / `State` 提取器）——`store()` 本就是全局单例，直接改用一个 `static AtomicBool`
+- `dirs_home()` 两处重复定义收敛到 `models.rs` 统一导出
+- 收窄 `tokio` 依赖 features：`rt-multi-thread` + `net`（去掉未使用的 `macros` / `time`）
+- `map_or(false, ..)` / `map_or(true, ..)` 改为 `is_some_and` / `is_none_or`
+
+### 文档
+
+- README 重写：补「已知限制」小节；卸载改为分步操作；「工作原理」按状态指示 / 模型代理 / 健壮性 / openai 兼容处理分节
+- 修正 README 中无依据的「macOS 13+」——bundle 未声明 `minimumSystemVersion`，沿用 Tauri 默认值
+- 补全目录结构缺失条目（`window-pos.ts`、`main.rs` 等）
+- 删除 `menu.ts` / `manager.ts` 注释里残留的占位标记「（七）」
 
 ## [0.0.1] - 2026-09-08
 
@@ -45,4 +56,5 @@
 - Sending / Waiting 状态桌宠定住不误播动画；权限批准后 alert 徽标正确解除
 - Claude Desktop 模型选择器收敛为单条入口，代理特判替换为当前激活模型
 
+[0.0.2]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.2
 [0.0.1]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.1

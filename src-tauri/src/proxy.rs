@@ -2,7 +2,7 @@
 // 入口 /claude-desktop/*（token 校验）；Code tab 内嵌的 CLI 由 Desktop 注入
 // host-creds（ANTHROPIC_BASE_URL 指向该前缀），不经 CLI 原生的 /v1/messages
 // 按 active 条目 format 分流：anthropic 换头直通；openai 协议转换（convert.rs）
-use axum::extract::{Request, State};
+use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -10,30 +10,18 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::convert;
 use crate::models::{ModelEntry, ModelsState, UpstreamFormat, DESKTOP_ROUTE, PROXY_ADDR};
 use crate::stream::{self, StreamTranslator};
 
-pub struct ProxyState {
-    running: AtomicBool,
-}
-
-#[derive(Clone)]
-pub struct AppStore(Arc<ProxyState>);
-
-static STORE: OnceLock<AppStore> = OnceLock::new();
-
-pub fn store() -> AppStore {
-    STORE
-        .get_or_init(|| AppStore(Arc::new(ProxyState { running: AtomicBool::new(false) })))
-        .clone()
-}
+// 代理是否在监听（仅菜单状态项展示用）
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_running() -> bool {
-    store().0.running.load(Ordering::Relaxed)
+    RUNNING.load(Ordering::Relaxed)
 }
 
 // 共享 reqwest 客户端：无总超时，连接超时 30s
@@ -52,7 +40,6 @@ pub async fn spawn() -> bool {
     let app = Router::new()
         .route(DESKTOP_ROUTE, any(handle_desktop))
         .route(&format!("{DESKTOP_ROUTE}/{{*path}}"), any(handle_desktop))
-        .with_state(store())
         // axum 默认 2MB 请求体上限会拒掉带截图 base64 的请求，放开到 MAX_BODY
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
 
@@ -63,10 +50,10 @@ pub async fn spawn() -> bool {
             return false;
         }
     };
-    store().0.running.store(true, Ordering::Relaxed);
+    RUNNING.store(true, Ordering::Relaxed);
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
-        store().0.running.store(false, Ordering::Relaxed);
+        RUNNING.store(false, Ordering::Relaxed);
     });
     true
 }
@@ -76,7 +63,7 @@ pub async fn spawn() -> bool {
 const MAX_BODY: usize = 200 * 1024 * 1024;
 
 // Claude Desktop：/claude-desktop 前缀，校验 Authorization: Bearer <desktopToken>
-async fn handle_desktop(_state: State<AppStore>, req: Request) -> Response {
+async fn handle_desktop(req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let token = ModelsState::load().desktop_token().to_string();
     let ok = !token.is_empty()
@@ -196,7 +183,7 @@ async fn forward_anthropic(
                 .unwrap_or("application/json")
                 .to_string();
             // 响应体（含 SSE）字节级直通，不解析
-            let stream = resp.bytes_stream().map(|r| r.map_err(|e| std::io::Error::other(e)));
+            let stream = resp.bytes_stream().map(|r| r.map_err(std::io::Error::other));
             let mut builder = Response::builder().status(status);
             if let Ok(v) = HeaderValue::from_str(&ct) {
                 builder = builder.header("content-type", v);

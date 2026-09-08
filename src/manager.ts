@@ -1,4 +1,4 @@
-// 模型管理窗逻辑：条目列表 + 表单 CRUD（七）
+// 模型管理窗逻辑：条目列表 + 表单 CRUD
 // 切换不在本窗做——只在螃蟹右键菜单；删除需确认
 import { invoke } from "@tauri-apps/api/core";
 

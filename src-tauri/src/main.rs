@@ -303,7 +303,7 @@ fn ensure_models_file() {
 }
 
 fn dirs_home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    models::dirs_home()
 }
 
 // ── hooks 自愈 ──
@@ -343,14 +343,10 @@ fn pet_hooks_present() -> bool {
         return false;
     };
     events.values().filter_map(|a| a.as_array()).flatten().any(|entry| {
-        entry["hooks"]
-            .as_array()
-            .map(|hs| {
-                hs.iter().any(|h| {
-                    h["command"].as_str().map_or(false, |c| c.contains(".claude/claude-pet"))
-                })
-            })
-            .unwrap_or(false)
+        entry["hooks"].as_array().is_some_and(|hs| {
+            hs.iter()
+                .any(|h| h["command"].as_str().is_some_and(|c| c.contains(".claude/claude-pet")))
+        })
     })
 }
 
@@ -415,12 +411,9 @@ fn ensure_hooks_installed() {
 
         // 剥离本应用已存在的 hook 条目（按 command 是否引用 pet 目录判断）
         arr.retain(|entry| {
-            entry["hooks"].as_array().map_or(true, |hs| {
-                hs.iter().all(|h| {
-                    h["command"]
-                        .as_str()
-                        .map_or(true, |c| !c.contains(".claude/claude-pet"))
-                })
+            entry["hooks"].as_array().is_none_or(|hs| {
+                hs.iter()
+                    .all(|h| h["command"].as_str().is_none_or(|c| !c.contains(".claude/claude-pet")))
             })
         });
 
