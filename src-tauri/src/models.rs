@@ -1,5 +1,4 @@
-// models.json 读写 + Claude Code settings.json 校正
-// 数据格式见 docs/ccswitch-replacement.md 第三节；activeId 即「切换」语义（第五节）
+// models.json 读写（activeId 即「切换」语义）+ Claude Code CLI settings.json 校正
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,7 +25,7 @@ pub struct ModelEntry {
     #[serde(default)]
     pub base_url: String,
     pub token: String,
-    // 目标模型名：发来的 claude-* 角色模型名固定替换为它（4.3）
+    // 目标模型名：发来的 claude-* 角色模型名固定替换为它
     pub model: String,
     pub supports_1m: bool,
 }
@@ -79,7 +78,7 @@ impl ModelsState {
         &self.desktop_token
     }
 
-    // desktopToken 不存在则生成（六.2）
+    // desktopToken 不存在则生成
     pub fn ensure_token(&mut self) {
         if self.desktop_token.is_empty() {
             self.desktop_token = format!("pet-{}", uuid::Uuid::new_v4().simple());
@@ -155,11 +154,12 @@ fn models_path() -> PathBuf {
     dirs_home().join(".claude/claude-pet/models.json")
 }
 
-fn dirs_home() -> PathBuf {
+pub fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
-// 首启（每次启动）校正 settings.json：指向本地代理，清理 cc-switch 遗留的模型别名键（4.4/六.3）
+// 每次启动校正 settings.json：env 指向本地代理（接管 CLI 的 /v1/messages 通路），
+// 并清理把请求钉死在旧模型上的别名键（模型替换统一在代理侧做）
 pub fn ensure_code_settings() {
     let settings_path = dirs_home().join(".claude/settings.json");
     if !settings_path.exists() {

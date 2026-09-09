@@ -1,6 +1,6 @@
 // 右键菜单：原生系统菜单（muda）。原生菜单由 OS 绘制，不受窗口 112×80 边界裁剪，
 // 可从任意位置弹出并支持子菜单/勾选项，扩展菜单时直接往 items 数组加项即可
-// 模型条目每次右键动态重建（七）：✓ 标记 active，点击即切换
+// 模型条目每次右键动态重建：✓ 标记 active，点击即切换
 import {
   Menu,
   MenuItem,
@@ -63,7 +63,7 @@ async function buildMenu(): Promise<Menu> {
         text: m.name,
         checked: m.active,
         action: () => {
-          // 只改 models.json 的 activeId（第五节）；下次右键重建菜单刷新 ✓
+          // 只改 models.json 的 activeId；下次右键重建菜单刷新 ✓
           void invoke("switch_model", { id: m.id });
         },
       })

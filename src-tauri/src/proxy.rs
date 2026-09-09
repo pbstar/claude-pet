@@ -1,7 +1,8 @@
-// 本地代理（127.0.0.1:15721）：Claude Code 与 Claude Desktop 共用
-// 两个入口同一流程：/v1/messages ← Code；/claude-desktop/* ← Desktop（token 校验）
+// 本地代理（127.0.0.1:15721）：Claude Code CLI 与 Claude Desktop Code tab 共用
+// 两个入口同一流程：/v1/messages ← CLI（settings.json env 注入）；
+// /claude-desktop/* ← Desktop（host-creds 注入，token 校验）
 // 按 active 条目 format 分流：anthropic 换头直通；openai 协议转换（convert.rs）
-use axum::extract::{Request, State};
+use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -9,32 +10,21 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::convert::{self, StreamTranslator};
+use crate::convert;
 use crate::models::{ModelEntry, ModelsState, UpstreamFormat, DESKTOP_ROUTE, PROXY_ADDR};
+use crate::stream::{self, StreamTranslator};
 
-pub struct ProxyState {
-    running: AtomicBool,
-}
-
-#[derive(Clone)]
-pub struct AppStore(Arc<ProxyState>);
-
-static STORE: OnceLock<AppStore> = OnceLock::new();
-
-pub fn store() -> AppStore {
-    STORE
-        .get_or_init(|| AppStore(Arc::new(ProxyState { running: AtomicBool::new(false) })))
-        .clone()
-}
+// 代理是否在监听（仅菜单状态项展示用）
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_running() -> bool {
-    store().0.running.load(Ordering::Relaxed)
+    RUNNING.load(Ordering::Relaxed)
 }
 
-// 共享 reqwest 客户端：无总超时，连接超时 30s（4.4）
+// 共享 reqwest 客户端：无总超时，连接超时 30s
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -52,7 +42,6 @@ pub async fn spawn() -> bool {
         .route("/v1/messages/count_tokens", any(handle_count_tokens))
         .route(DESKTOP_ROUTE, any(handle_desktop))
         .route(&format!("{DESKTOP_ROUTE}/{{*path}}"), any(handle_desktop))
-        .with_state(store())
         // axum 默认 2MB 请求体上限会拒掉带截图 base64 的请求，放开到 MAX_BODY
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
 
@@ -63,10 +52,10 @@ pub async fn spawn() -> bool {
             return false;
         }
     };
-    store().0.running.store(true, Ordering::Relaxed);
+    RUNNING.store(true, Ordering::Relaxed);
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
-        store().0.running.store(false, Ordering::Relaxed);
+        RUNNING.store(false, Ordering::Relaxed);
     });
     true
 }
@@ -75,9 +64,13 @@ pub async fn spawn() -> bool {
 
 const MAX_BODY: usize = 200 * 1024 * 1024;
 
-// Claude Code：POST /v1/messages（token 是占位符 PROXY_MANAGED，不校验）
-async fn handle_messages(_state: State<AppStore>, req: Request) -> Response {
-    read_body_and_forward(req).await
+// Claude Code CLI：POST /v1/messages（token 是注入的占位符 PROXY_MANAGED，不校验）
+async fn handle_messages(req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        return err_response(StatusCode::BAD_REQUEST, "invalid request body");
+    };
+    forward(&parts.headers, &parts.uri, &bytes).await
 }
 
 // count_tokens：openai 上游无对应端点，本地粗估（≈字符数/4，够 CLI 展示用）；
@@ -109,7 +102,7 @@ async fn handle_count_tokens(req: Request) -> Response {
 }
 
 // Claude Desktop：/claude-desktop 前缀，校验 Authorization: Bearer <desktopToken>
-async fn handle_desktop(_state: State<AppStore>, req: Request) -> Response {
+async fn handle_desktop(req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let token = ModelsState::load().desktop_token().to_string();
     let ok = !token.is_empty()
@@ -122,21 +115,13 @@ async fn handle_desktop(_state: State<AppStore>, req: Request) -> Response {
     if !ok {
         return err_response(StatusCode::UNAUTHORIZED, "invalid desktop token");
     }
-    // Desktop 网关前缀剥掉，上游只认原生路径（/v1/messages 等）
+    // Desktop 网关前缀剥掉，上游只认原生路径
     let uri = strip_desktop_prefix(&parts.uri);
     let headers = parts.headers;
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
         return err_response(StatusCode::BAD_REQUEST, "invalid request body");
     };
     forward(&headers, &uri, &bytes).await
-}
-
-async fn read_body_and_forward(req: Request) -> Response {
-    let (parts, body) = req.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
-        return err_response(StatusCode::BAD_REQUEST, "invalid request body");
-    };
-    forward(&parts.headers, &parts.uri, &bytes).await
 }
 
 fn strip_desktop_prefix(uri: &Uri) -> Uri {
@@ -149,7 +134,7 @@ fn strip_desktop_prefix(uri: &Uri) -> Uri {
 // ─────────────────────────── 转发主流程 ───────────────────────────
 
 async fn forward(headers: &HeaderMap, uri: &Uri, body_bytes: &[u8]) -> Response {
-    // 每请求现读 models.json 取 active：换条目对下一个请求即时生效，跑着的流不断（4.4）
+    // 每请求现读 models.json 取 active：换条目对下一个请求即时生效，跑着的流不断
     let state = ModelsState::load();
     let Some(entry) = state.active().cloned() else {
         return err_response(StatusCode::SERVICE_UNAVAILABLE, "claude-pet: no active model entry");
@@ -160,52 +145,46 @@ async fn forward(headers: &HeaderMap, uri: &Uri, body_bytes: &[u8]) -> Response 
         Err(e) => return err_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
     };
     let src_model = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
-    let (target_model, had_1m) = resolve_model(&src_model, &entry);
+    let target_model = resolve_model(&src_model, &entry);
 
     match entry.format {
-        UpstreamFormat::Anthropic => forward_anthropic(&entry, headers, uri, &body, &target_model, had_1m).await,
+        UpstreamFormat::Anthropic => forward_anthropic(&entry, headers, uri, &body, &target_model).await,
         UpstreamFormat::Openai => forward_openai(&entry, &body, &target_model, &src_model).await,
     }
 }
 
-// 4.3 模型替换与 1M：claude-* 角色模型名固定替换为条目目标模型；
+// 模型替换与 1M：claude-* 角色模型名固定替换为条目目标模型；
 // 主体不含角色关键词时原样透传（兜底，如用户显式 /model 指定上游原生模型名）
-fn resolve_model(src_model: &str, entry: &ModelEntry) -> (String, bool) {
-    let (main, had_1m) = match src_model.strip_suffix("[1m]").or_else(|| src_model.strip_suffix("[1M]")) {
-        Some(main) => (main, true),
-        None => (src_model, false),
-    };
+fn resolve_model(src_model: &str, entry: &ModelEntry) -> String {
+    let main = src_model
+        .strip_suffix("[1m]")
+        .or_else(|| src_model.strip_suffix("[1M]"))
+        .unwrap_or(src_model);
     // "custom" = Desktop 选择器写死的 claude-custom 哨兵名（desktop_profile.rs），同样替换
     let is_role = ["fable", "opus", "sonnet", "haiku", "custom"]
         .iter()
         .any(|r| main.to_lowercase().contains(r));
-    let target = if is_role || main.is_empty() {
+    // [1m] 是客户端本地能力标记，上游普遍拒收——只用来驱动 context-1m beta 头，
+    // 绝不拼回模型名
+    if is_role || main.is_empty() {
         entry.model.clone()
     } else {
         main.to_string()
-    };
-    // supports1m=true 保留后缀（重建为小写 [1m]）；false 剥掉
-    let final_model = if had_1m && entry.supports_1m {
-        format!("{target}[1m]")
-    } else {
-        target
-    };
-    (final_model, had_1m && entry.supports_1m)
+    }
 }
 
-// ── 管道 A：anthropic 换头直通（4.0）──
+// ── 管道 A：anthropic 换头直通 ──
 async fn forward_anthropic(
     entry: &ModelEntry,
     headers: &HeaderMap,
     uri: &Uri,
     body: &Value,
     target_model: &str,
-    had_1m: bool,
 ) -> Response {
     let mut out_body = body.clone();
     out_body["model"] = json!(target_model);
 
-    // 上游 URL = baseUrl + 原样 path/query（与 CLI 直连上游拼接等价）
+    // 上游 URL = baseUrl + 原样 path/query（与客户端直连上游拼接等价）
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let url = format!("{}/{}", entry.base_url.trim_end_matches('/'), path.trim_start_matches('/'));
     let url = url.trim_end_matches('/').to_string();
@@ -215,14 +194,14 @@ async fn forward_anthropic(
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {}", entry.token));
     // 剥入来的 host/authorization/x-api-key（已重新注入），其余头透传；
-    // anthropic-beta 头按条目 supports1m 收敛 context-1m（4.3）
+    // anthropic-beta 头按条目 supports1m 收敛 context-1m
     for (k, v) in headers.iter() {
         let key = k.as_str();
         if matches!(key, "host" | "authorization" | "x-api-key" | "content-length" | "accept-encoding") {
             continue;
         }
         if key == "anthropic-beta" {
-            if let Some(filtered) = filter_beta(v, had_1m, entry.supports_1m) {
+            if let Some(filtered) = filter_beta(v, entry.supports_1m) {
                 req = req.header(key, filtered);
             }
             continue;
@@ -243,7 +222,7 @@ async fn forward_anthropic(
                 .unwrap_or("application/json")
                 .to_string();
             // 响应体（含 SSE）字节级直通，不解析
-            let stream = resp.bytes_stream().map(|r| r.map_err(|e| std::io::Error::other(e)));
+            let stream = resp.bytes_stream().map(|r| r.map_err(std::io::Error::other));
             let mut builder = Response::builder().status(status);
             if let Ok(v) = HeaderValue::from_str(&ct) {
                 builder = builder.header("content-type", v);
@@ -256,7 +235,7 @@ async fn forward_anthropic(
 
 // 放行规则：条目 supports1m=true → 保留全部 beta（含 context-1m）；
 // 否则移除 context-1m-*，其余放行（请求本身带不带 [1m] 不影响其他 beta 特性）
-fn filter_beta(v: &HeaderValue, _had_1m: bool, supports_1m: bool) -> Option<String> {
+fn filter_beta(v: &HeaderValue, supports_1m: bool) -> Option<String> {
     let beta = v.to_str().ok()?;
     if supports_1m {
         return Some(beta.to_string());
@@ -269,7 +248,7 @@ fn filter_beta(v: &HeaderValue, _had_1m: bool, supports_1m: bool) -> Option<Stri
     if filtered.is_empty() { None } else { Some(filtered.join(", ")) }
 }
 
-// ── 管道 B：openai 协议转换（4.1/4.2）──
+// ── 管道 B：openai 协议转换 ──
 async fn forward_openai(entry: &ModelEntry, body: &Value, target_model: &str, src_model: &str) -> Response {
     let wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let out_body = convert::convert_request(body, target_model);
@@ -306,7 +285,7 @@ async fn forward_openai(entry: &ModelEntry, body: &Value, target_model: &str, sr
     if wants_stream && is_sse {
         return sse_translated(resp, src_model);
     }
-    // 非流式；或 stream:true 但上游回 JSON → 整读按非流式转换（4.4）
+    // 非流式；或 stream:true 但上游回 JSON → 整读按非流式转换
     let v: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => return err_response(StatusCode::BAD_GATEWAY, format!("upstream decode failed: {e}")),
@@ -315,74 +294,53 @@ async fn forward_openai(entry: &ModelEntry, body: &Value, target_model: &str, sr
         return Json(convert::convert_response(&v, src_model)).into_response();
     }
     // 单个 SSE 序列回给客户端
-    let events = full_message_to_sse(&convert::convert_response(&v, src_model));
-    sse_response(vec![Ok(render_sse(&events))])
+    let events = stream::full_message_to_sse(&convert::convert_response(&v, src_model));
+    sse_response(vec![Ok(stream::render_sse(&events))])
 }
 
 // 流式核心路径：上游 SSE → 翻译状态机 → 客户端 SSE，逐块直通不缓冲
 fn sse_translated(resp: reqwest::Response, src_model: &str) -> Response {
-    let translator = StreamTranslator::new(src_model.to_string());
-    // 流开头：message_start 先行（4.2：连接建立即发，content 随块逐个出现）
-    let pending: Vec<Result<String, std::io::Error>> = vec![Ok(render_sse(&translator.start_events()))];
     let init = StreamState {
-        translator,
-        pending,
+        translator: StreamTranslator::new(src_model.to_string()),
         buffer: String::new(),
-        stop_reason: "end_turn".to_string(),
+        utf8_rem: Vec::new(),
         upstream: Box::pin(resp.bytes_stream().map(|r| r.map_err(std::io::Error::other))),
         finished: false,
+        done: false,
     };
     let stream = futures_util::stream::unfold(init, |mut st| async move {
         loop {
-            // 1. 待发队列优先（message_start）
-            if !st.pending.is_empty() {
-                let frame = st.pending.remove(0);
-                return Some((frame, st));
+            // 收尾事件已发过 → 流到此结束，否则会重复发 message_stop
+            if st.done {
+                return None;
             }
-            // 2. 消化缓冲区里的完整 SSE 帧
+            // 1. 消化缓冲区里的完整 SSE 帧
             let mut events: Vec<Value> = Vec::new();
-            let (frames, consumed) = convert::parse_sse_frames(&st.buffer);
+            let (frames, consumed) = stream::parse_sse_frames(&st.buffer);
             st.buffer.drain(..consumed);
             let mut saw_done = false;
             for f in &frames {
-                if f == convert::DONE_SENTINEL {
+                if f == stream::DONE_SENTINEL {
                     saw_done = true;
                     continue;
                 }
-                let Ok(chunk) = serde_json::from_str::<Value>(f) else { continue };
-                if let Some(fr) = chunk["choices"][0]["finish_reason"].as_str() {
-                    if !fr.is_empty() {
-                        st.stop_reason = fr.to_string();
-                    }
+                if let Ok(chunk) = serde_json::from_str::<Value>(f) {
+                    events.extend(st.translator.feed(&chunk));
                 }
-                events.extend(st.translator.feed(&chunk));
             }
-            if saw_done {
-                events.extend(st.translator.finish(&st.stop_reason));
-                st.finished = true;
+            // 2. 上游结束（[DONE] 或断流）→ 收尾
+            if saw_done || st.finished {
+                events.extend(st.translator.finish());
+                st.done = true;
+                return Some((Ok::<String, std::io::Error>(stream::render_sse(&events)), st));
             }
             if !events.is_empty() {
-                return Some((Ok::<String, std::io::Error>(render_sse(&events)), st));
-            }
-            if st.finished {
-                return None;
+                return Some((Ok(stream::render_sse(&events)), st));
             }
             // 3. 缓冲区无完整帧，拉下一块上游字节
             match st.upstream.next().await {
-                Some(Ok(bytes)) => match String::from_utf8(bytes.to_vec()) {
-                    Ok(s) => st.buffer.push_str(&s),
-                    Err(_) => {
-                        let evs = st.translator.finish(&st.stop_reason);
-                        st.finished = true;
-                        return Some((Ok(render_sse(&evs)), st));
-                    }
-                },
-                // 上游断流/结束：按当前 stop_reason 收尾（含空流兜底）
-                Some(Err(_)) | None => {
-                    let evs = st.translator.finish(&st.stop_reason);
-                    st.finished = true;
-                    return Some((Ok(render_sse(&evs)), st));
-                }
+                Some(Ok(bytes)) => stream::append_utf8_safe(&mut st.buffer, &mut st.utf8_rem, &bytes),
+                Some(Err(_)) | None => st.finished = true,
             }
         }
     });
@@ -395,20 +353,14 @@ fn sse_translated(resp: reqwest::Response, src_model: &str) -> Response {
 
 struct StreamState {
     translator: StreamTranslator,
-    pending: Vec<Result<String, std::io::Error>>,
     buffer: String,
-    stop_reason: String,
+    // 跨块截断的多字节 UTF-8 残片，等下一块补齐再解析
+    utf8_rem: Vec<u8>,
     upstream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>,
+    // 上游已结束，待发收尾事件
     finished: bool,
-}
-
-// Anthropic SSE 事件序列 → 响应字节（event: 类型 + data: JSON + 空行）
-fn render_sse(events: &[Value]) -> String {
-    let mut out = String::new();
-    for ev in events {
-        out.push_str(&format!("event: {}\ndata: {}\n\n", ev["type"].as_str().unwrap_or("message"), ev));
-    }
-    out
+    // 收尾事件已发，流终止
+    done: bool,
 }
 
 fn sse_response(frames: Vec<Result<String, std::io::Error>>) -> Response {
@@ -500,7 +452,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-// 上游错误体翻译为 Anthropic 错误结构，保留状态码（CLI 重试逻辑依赖，4.4）
+// 上游错误体翻译为 Anthropic 错误结构，保留状态码（客户端重试逻辑依赖）
 fn upstream_error_response(status: u16, message: String) -> Response {
     let typ = match status {
         429 => "rate_limit_error",
@@ -516,44 +468,4 @@ fn upstream_error_response(status: u16, message: String) -> Response {
 
 fn err_response(status: StatusCode, message: impl std::fmt::Display) -> Response {
     upstream_error_response(status.as_u16(), message.to_string())
-}
-
-// 完整 Anthropic message JSON → 单轮 SSE 事件序列（上游非 SSE 兜底）
-fn full_message_to_sse(msg: &Value) -> Vec<Value> {
-    let usage = &msg["usage"];
-    let mut events = vec![json!({
-        "type": "message_start",
-        "message": {
-            "id": msg["id"].clone(),
-            "type": "message",
-            "role": "assistant",
-            "model": msg["model"].clone(),
-            "content": [],
-            "stop_reason": Value::Null,
-            "usage": {"input_tokens": usage["input_tokens"].as_u64().unwrap_or(0), "output_tokens": 0},
-        }
-    })];
-    for (i, block) in msg["content"].as_array().cloned().unwrap_or_default().iter().enumerate() {
-        let is_tool = block["type"].as_str() == Some("tool_use");
-        let start_block = if is_tool {
-            json!({"type": "tool_use", "id": block["id"].clone(), "name": block["name"].clone(), "input": {}})
-        } else {
-            json!({"type": "text", "text": ""})
-        };
-        events.push(json!({"type": "content_block_start", "index": i, "content_block": start_block}));
-        let delta = if is_tool {
-            json!({"type": "input_json_delta", "partial_json": block["input"].to_string()})
-        } else {
-            json!({"type": "text_delta", "text": block["text"].as_str().unwrap_or("")})
-        };
-        events.push(json!({"type": "content_block_delta", "index": i, "delta": delta}));
-        events.push(json!({"type": "content_block_stop", "index": i}));
-    }
-    events.push(json!({
-        "type": "message_delta",
-        "delta": {"stop_reason": msg["stop_reason"].clone(), "stop_sequence": Value::Null},
-        "usage": {"output_tokens": usage["output_tokens"].as_u64().unwrap_or(0)},
-    }));
-    events.push(json!({"type": "message_stop"}));
-    events
 }

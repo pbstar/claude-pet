@@ -1,4 +1,4 @@
-// Claude Desktop 3p 网关 profile 写入（六.4）
+// Claude Desktop 3p 网关 profile 写入
 // 仅当 Claude-3p 目录存在才做（未装 Desktop 静默跳过）；写前全量快照、任一步失败回滚，
 // 幂等风格与 ensure_hooks_installed 一致。
 use std::fs;
