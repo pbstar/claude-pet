@@ -11,6 +11,7 @@
 
 - **黄灯闪跳**：并行工具/子代理触发的 `PreToolUse`/`PostToolUse` 会覆盖尚未解除的 `permission` 状态，桌宠在 alert 与 walking 之间来回跳。hook 侧加锁串行化「读旧状态 → 判定 → 写新状态」，并在权限待批准期间丢弃工作态写入（判据与 TS 端解冻逻辑一致：transcript 未推进即权限仍未解除）
 - `notify` 改按结构化 `notification_type` 判定权限通知；原先全文匹配 `permission/approve/allow`，会被通知文案或路径误命中
+- **压缩摘要的内部标签泄漏到正文**：上下文压缩时 Claude Code 要求模型把思考写进 `<analysis>`、总结写进 `<summary>`，官方链路由客户端自己剥离这两个标签；走 openai 转换时原文被当普通 text 块透传，标签直接显示在输出里。新增 `TagSanitizer`，语义与客户端 `ihg()` 一致——丢弃 `analysis` 段、`summary` 只留正文，流式分片切断标签也能正确识别（流式与非流式两条路径均生效）
 
 ### 优化
 
