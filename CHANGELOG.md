@@ -5,6 +5,18 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，菜单/安装包版本自动跟随）。
 
+## [0.0.3] - 2026-09-09
+
+### 修复
+
+- **黄灯闪跳**：并行工具/子代理触发的 `PreToolUse`/`PostToolUse` 会覆盖尚未解除的 `permission` 状态，桌宠在 alert 与 walking 之间来回跳。hook 侧加锁串行化「读旧状态 → 判定 → 写新状态」，并在权限待批准期间丢弃工作态写入（判据与 TS 端解冻逻辑一致：transcript 未推进即权限仍未解除）
+- `notify` 改按结构化 `notification_type` 判定权限通知；原先全文匹配 `permission/approve/allow`，会被通知文案或路径误命中
+
+### 优化
+
+- 报警迟滞：进入 alert 立即生效，离开 alert 需连续两拍确认，吸收残余信号抖动
+- `read_sessions` 先取 transcript mtime 再决定是否读尾部，陈旧会话不再每轮白读 8KB
+
 ## [0.0.2] - 2026-09-09
 
 ### 修复
@@ -34,5 +46,6 @@
 - hooks 信号失效时以 transcript 活跃度兜底，桌宠动画不僵死
 - 权限批准后徽标正确解除；Claude Desktop 模型选择器收敛为单条入口
 
+[0.0.3]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.3
 [0.0.2]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.2
 [0.0.1]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.1
