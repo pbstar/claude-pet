@@ -46,7 +46,7 @@ async function refresh(): Promise<void> {
 
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = `${m.format} · ${m.model}${m.supports1m ? " · 1M" : ""}`;
+    meta.textContent = `${m.model}${m.supports1m ? " · 1M" : ""}`;
     li.appendChild(meta);
 
     const editBtn = document.createElement("button");
