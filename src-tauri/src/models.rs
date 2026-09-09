@@ -1,4 +1,4 @@
-// models.json 读写（activeId 即「切换」语义）
+// models.json 读写（activeId 即「切换」语义）+ Claude Code CLI settings.json 校正
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -156,4 +156,56 @@ fn models_path() -> PathBuf {
 
 pub fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+// 每次启动校正 settings.json：env 指向本地代理（接管 CLI 的 /v1/messages 通路），
+// 并清理把请求钉死在旧模型上的别名键（模型替换统一在代理侧做）
+pub fn ensure_code_settings() {
+    let settings_path = dirs_home().join(".claude/settings.json");
+    if !settings_path.exists() {
+        return;
+    }
+    let mut settings = match fs::read_to_string(&settings_path) {
+        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+
+    let env = match settings.as_object_mut() {
+        Some(obj) => obj.entry("env").or_insert_with(|| serde_json::json!({})),
+        None => return,
+    };
+    let changed = {
+        let env = env.as_object_mut().unwrap();
+        let mut changed = false;
+        for (k, v) in [
+            ("ANTHROPIC_BASE_URL", PROXY_URL),
+            ("ANTHROPIC_AUTH_TOKEN", "PROXY_MANAGED"),
+        ] {
+            if env.get(k).and_then(|v| v.as_str()) != Some(v) {
+                env.insert(k.to_string(), serde_json::json!(v));
+                changed = true;
+            }
+        }
+        // 这些键会把请求钉死在旧模型上；模型替换统一在代理侧
+        for k in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ] {
+            if env.remove(k).is_some() {
+                changed = true;
+            }
+        }
+        changed
+    };
+    if changed {
+        let _ = fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap());
+    }
 }

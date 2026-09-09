@@ -222,6 +222,7 @@ async fn retry_proxy() -> bool {
     }
     if proxy::spawn().await {
         ensure_models_file();
+        models::ensure_code_settings();
         desktop_profile::ensure_desktop_profile();
         true
     } else {
@@ -266,8 +267,9 @@ fn main() {
     let proxy_up = rt.block_on(proxy::spawn());
 
     if proxy_up {
-        // 顺序：models.json（含 token 生成）→ Desktop profile（依赖 token，必须在之后）
+        // 顺序：models.json（含 token 生成）→ settings.json → Desktop profile（依赖 token，必须在最后）
         ensure_models_file();
+        models::ensure_code_settings();
         desktop_profile::ensure_desktop_profile();
     } else {
         eprintln!("claude-pet: proxy not started, skip config sync (settings untouched)");

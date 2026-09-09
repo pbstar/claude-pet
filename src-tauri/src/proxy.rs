@@ -1,6 +1,6 @@
-// 本地代理（127.0.0.1:15721）：服务 Claude Desktop 的 Code tab
-// 入口 /claude-desktop/*（token 校验）；Code tab 内嵌的 CLI 由 Desktop 注入
-// host-creds（ANTHROPIC_BASE_URL 指向该前缀），不经 CLI 原生的 /v1/messages
+// 本地代理（127.0.0.1:15721）：Claude Code CLI 与 Claude Desktop Code tab 共用
+// 两个入口同一流程：/v1/messages ← CLI（settings.json env 注入）；
+// /claude-desktop/* ← Desktop（host-creds 注入，token 校验）
 // 按 active 条目 format 分流：anthropic 换头直通；openai 协议转换（convert.rs）
 use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
@@ -38,6 +38,8 @@ fn http_client() -> &'static reqwest::Client {
 // 启动代理；绑定失败（端口被占，如 cc-switch 未退）返回 false，不写任何配置
 pub async fn spawn() -> bool {
     let app = Router::new()
+        .route("/v1/messages", any(handle_messages))
+        .route("/v1/messages/count_tokens", any(handle_count_tokens))
         .route(DESKTOP_ROUTE, any(handle_desktop))
         .route(&format!("{DESKTOP_ROUTE}/{{*path}}"), any(handle_desktop))
         // axum 默认 2MB 请求体上限会拒掉带截图 base64 的请求，放开到 MAX_BODY
@@ -61,6 +63,43 @@ pub async fn spawn() -> bool {
 // ─────────────────────────── 入口路由 ───────────────────────────
 
 const MAX_BODY: usize = 200 * 1024 * 1024;
+
+// Claude Code CLI：POST /v1/messages（token 是注入的占位符 PROXY_MANAGED，不校验）
+async fn handle_messages(req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        return err_response(StatusCode::BAD_REQUEST, "invalid request body");
+    };
+    forward(&parts.headers, &parts.uri, &bytes).await
+}
+
+// count_tokens：openai 上游无对应端点，本地粗估（≈字符数/4，够 CLI 展示用）；
+// anthropic 上游本可直通，但该接口 CLI 仅作显示，统一走估算即可
+async fn handle_count_tokens(req: Request) -> Response {
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), MAX_BODY).await else {
+        return err_response(StatusCode::BAD_REQUEST, "invalid request body");
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return err_response(StatusCode::BAD_REQUEST, "invalid JSON");
+    };
+    // 粗估：system + 全部消息文本长度 / 4
+    let mut chars = v["system"].as_str().map(str::len).unwrap_or(0);
+    if let Some(arr) = v["messages"].as_array() {
+        for m in arr {
+            match &m["content"] {
+                Value::String(s) => chars += s.len(),
+                Value::Array(blocks) => {
+                    for b in blocks {
+                        chars += b["text"].as_str().map(str::len).unwrap_or(0);
+                        chars += b["content"].as_str().map(str::len).unwrap_or(0);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (StatusCode::OK, Json(json!({"input_tokens": (chars / 4).max(1)}))).into_response()
+}
 
 // Claude Desktop：/claude-desktop 前缀，校验 Authorization: Bearer <desktopToken>
 async fn handle_desktop(req: Request) -> Response {
