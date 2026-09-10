@@ -335,7 +335,12 @@ pub fn convert_response(resp: &Value, src_model: &str) -> Value {
         }
         if let Some(t) = msg.get("content").and_then(Value::as_str) {
             if !t.is_empty() {
-                content.push(json!({"type": "text", "text": t}));
+                // 压缩摘要请求会带 <analysis>/<summary> 标签：丢弃 analysis 段、
+                // 剥掉 summary 标签——原样返回会让标签出现在可见输出里
+                let text = crate::stream::sanitize_internal_tags(t);
+                if !text.is_empty() {
+                    content.push(json!({"type": "text", "text": text}));
+                }
             }
         }
         if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {

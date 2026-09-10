@@ -9,6 +9,144 @@ use std::collections::BTreeMap;
 
 use crate::convert::{map_stop_reason, map_usage};
 
+// ─────────────────────── 内部标签净化（压缩摘要请求） ───────────────────────
+//
+// Claude Code 上下文压缩时会发「总结对话」请求，提示词要求模型把思考写进
+// <analysis>、总结写进 <summary>。官方链路里由客户端自己剥离这两个标签
+// （claude.exe 的 ihg()：删掉 analysis 段、取 summary 正文）；
+// 走 openai 转换时若原样透传，标签就会显示在可见输出里。
+// 这里对齐同款语义：丢弃 analysis 段，summary 只留正文。
+// 不改成 thinking 块——客户端会解析该标签，块类型一变反而可能让压缩校验失败。
+const ANALYSIS_OPEN: &str = "<analysis>";
+const ANALYSIS_CLOSE: &str = "</analysis>";
+const SUMMARY_TAGS: [&str; 2] = ["<summary>", "</summary>"];
+
+#[derive(PartialEq)]
+enum TagPhase {
+    // 还看不出正文是否以 <analysis> 开头，先攒着
+    Detecting,
+    // 正在 analysis 段内，内容丢弃（仅留作空输出兜底）
+    Analysis,
+    // 普通正文，只需剥掉 summary 标签
+    Body,
+}
+
+pub struct TagSanitizer {
+    phase: TagPhase,
+    buf: String,
+    // analysis 段内容：正常丢弃，仅当整条消息没有任何正文时兜底吐出
+    dropped: String,
+    emitted: bool,
+}
+
+impl Default for TagSanitizer {
+    fn default() -> Self {
+        Self {
+            phase: TagPhase::Detecting,
+            buf: String::new(),
+            dropped: String::new(),
+            emitted: false,
+        }
+    }
+}
+
+impl TagSanitizer {
+    // 喂一段正文增量，返回可输出的 text 增量
+    pub fn push(&mut self, chunk: &str) -> String {
+        // 一律走缓冲区：Body 阶段也要留住尾部可能的半截标签，否则会被切碎漏出去
+        self.buf.push_str(chunk);
+        self.drain(false)
+    }
+
+    // 流结束：吐出攒着的尾巴；全程只有 analysis 段时兜底返回它，避免空消息
+    pub fn finish(&mut self) -> String {
+        let mut out = self.drain(true);
+        if !self.emitted && out.is_empty() && !self.dropped.trim().is_empty() {
+            out = strip_summary_tags(&self.dropped);
+        }
+        out
+    }
+
+    fn drain(&mut self, at_end: bool) -> String {
+        let mut text = String::new();
+        loop {
+            match self.phase {
+                TagPhase::Detecting => {
+                    let lead = self.buf.len() - self.buf.trim_start().len();
+                    let rest = &self.buf[lead..];
+                    if rest.starts_with(ANALYSIS_OPEN) {
+                        self.buf.drain(..lead + ANALYSIS_OPEN.len());
+                        self.phase = TagPhase::Analysis;
+                    } else if ANALYSIS_OPEN.starts_with(rest) && !at_end {
+                        return text; // 可能是 analysis 前缀，等下一片
+                    } else {
+                        self.phase = TagPhase::Body;
+                    }
+                }
+                TagPhase::Analysis => match self.buf.find(ANALYSIS_CLOSE) {
+                    Some(i) => {
+                        self.dropped.push_str(&self.buf[..i]);
+                        self.buf.drain(..i + ANALYSIS_CLOSE.len());
+                        self.phase = TagPhase::Body;
+                    }
+                    None => {
+                        if at_end {
+                            self.dropped.push_str(&std::mem::take(&mut self.buf));
+                        }
+                        return text;
+                    }
+                },
+                TagPhase::Body => {
+                    // 尾部可能是被切断的标签前缀，留到下一片；流已结束则不再留
+                    let hold = if at_end { 0 } else { partial_tag_suffix_len(&self.buf) };
+                    let cut = self.buf.len() - hold;
+                    let chunk: String = self.buf.drain(..cut).collect();
+                    text.push_str(&strip_summary_tags(&chunk));
+                    if !text.is_empty() {
+                        self.emitted = true;
+                    }
+                    return text;
+                }
+            }
+        }
+    }
+}
+
+// 结尾有多少字节是某个标签的**不完整**前缀，需留到下一片再判；
+// 完整标签不算（交给 strip_summary_tags 直接剥掉）
+fn partial_tag_suffix_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    let max = SUMMARY_TAGS.iter().map(|t| t.len()).max().unwrap_or(0);
+    for k in (1..max).rev() {
+        if k > b.len() {
+            continue;
+        }
+        let tail = &b[b.len() - k..];
+        if SUMMARY_TAGS.iter().any(|t| k < t.len() && t.as_bytes().starts_with(tail)) {
+            return k;
+        }
+    }
+    0
+}
+
+fn strip_summary_tags(s: &str) -> String {
+    let mut out = s.to_string();
+    for tag in SUMMARY_TAGS {
+        if out.contains(tag) {
+            out = out.replace(tag, "");
+        }
+    }
+    out
+}
+
+// 非流式正文：一次性净化
+pub fn sanitize_internal_tags(raw: &str) -> String {
+    let mut s = TagSanitizer::default();
+    let mut out = s.push(raw);
+    out.push_str(&s.finish());
+    out
+}
+
 // ─────────────────────────── SSE 帧读写 ───────────────────────────
 
 pub const DONE_SENTINEL: &str = "[DONE]";
@@ -119,6 +257,8 @@ pub struct StreamTranslator {
     open_tools: Vec<u64>,
     usage: Value,
     stop_reason: Option<String>,
+    // 正文里的 <analysis>/<summary> 标签净化器（压缩摘要请求会带这些标签）
+    sanitizer: TagSanitizer,
 }
 
 impl StreamTranslator {
@@ -132,6 +272,7 @@ impl StreamTranslator {
             open_tools: Vec::new(),
             usage: json!({"input_tokens": 0, "output_tokens": 0}),
             stop_reason: None,
+            sanitizer: TagSanitizer::default(),
         }
     }
 
@@ -170,11 +311,16 @@ impl StreamTranslator {
 
         if let Some(t) = delta.get("content").and_then(Value::as_str) {
             if !t.is_empty() {
-                self.open_non_tool(OpenBlock::Text, &mut events);
-                events.push(delta_event(
-                    self.block_index - 1,
-                    json!({"type": "text_delta", "text": t}),
-                ));
+                // 压缩摘要请求的正文带 <analysis>/<summary> 标签：丢弃 analysis 段、
+                // 剥掉 summary 标签——原样透传会让标签出现在可见输出里
+                let text = self.sanitizer.push(t);
+                if !text.is_empty() {
+                    self.open_non_tool(OpenBlock::Text, &mut events);
+                    events.push(delta_event(
+                        self.block_index - 1,
+                        json!({"type": "text_delta", "text": text}),
+                    ));
+                }
             }
         }
 
@@ -196,6 +342,15 @@ impl StreamTranslator {
         if !self.started {
             self.started = true;
             events.push(self.message_start(&Value::Null));
+        }
+        // 净化器里可能还攒着未判定的尾巴（如截断的标签前缀），先吐干净
+        let text = self.sanitizer.finish();
+        if !text.is_empty() {
+            self.open_non_tool(OpenBlock::Text, &mut events);
+            events.push(delta_event(
+                self.block_index - 1,
+                json!({"type": "text_delta", "text": text}),
+            ));
         }
         self.close_non_tool(&mut events);
         self.late_start_tools(&mut events);
@@ -562,6 +717,84 @@ mod tests {
             .collect();
         assert_eq!(starts.len(), 2);
         assert_ne!(starts[0], starts[1], "并行工具块的 index 不能重复");
+    }
+
+    // 压缩摘要请求：analysis 段丢弃，summary 只留正文，标签绝不进正文
+    #[test]
+    fn compact_summary_tags_never_reach_text() {
+        let mut t = StreamTranslator::new("m".into());
+        let mut ev = t.feed(&json!({
+            "id": "c1",
+            "choices": [{"delta": {"content": "<analysis>\n思考内容\n</analysis>\n"}}]
+        }));
+        ev.extend(t.feed(&json!({
+            "choices": [{"delta": {"content": "<summary>\n1. 主要请求\n</summary>"}}]
+        })));
+        ev.extend(t.finish());
+        let text: String = ev.iter()
+            .filter(|e| e["delta"]["type"] == "text_delta")
+            .map(|e| e["delta"]["text"].as_str().unwrap())
+            .collect();
+        assert!(!text.contains("<analysis>") && !text.contains("<summary>"), "标签不能出现在正文: {text}");
+        assert!(!text.contains("思考内容"), "analysis 段应丢弃");
+        assert!(text.contains("1. 主要请求"), "summary 正文要保留");
+    }
+
+    // 标签被切成多个 SSE 分片：仍要正确识别，且不能丢字
+    #[test]
+    fn compact_tags_split_across_chunks_are_handled() {
+        let mut t = StreamTranslator::new("m".into());
+        let mut ev = t.feed(&json!({"id": "c1", "choices": [{"delta": {"content": "<ana"}}]}));
+        ev.extend(t.feed(&json!({"choices": [{"delta": {"content": "lysis>想</anal"}}]})));
+        ev.extend(t.feed(&json!({"choices": [{"delta": {"content": "ysis><summ"}}]})));
+        ev.extend(t.feed(&json!({"choices": [{"delta": {"content": "ary>正文</summary>"}}]})));
+        ev.extend(t.finish());
+        let text: String = ev.iter()
+            .filter(|e| e["delta"]["type"] == "text_delta")
+            .map(|e| e["delta"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(text, "正文");
+        assert!(!text.contains('<'));
+    }
+
+    // 普通正文（无标签）不能被净化逻辑吃掉或改动
+    #[test]
+    fn plain_text_passes_through_untouched() {
+        let mut t = StreamTranslator::new("m".into());
+        let mut ev = t.feed(&json!({
+            "id": "c1", "choices": [{"delta": {"content": "看看 <code> 和 a<b 这种普通文本"}}]
+        }));
+        ev.extend(t.finish());
+        let text: String = ev.iter()
+            .filter(|e| e["delta"]["type"] == "text_delta")
+            .map(|e| e["delta"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(text, "看看 <code> 和 a<b 这种普通文本");
+    }
+
+    // 只有 analysis 段、没有正文时兜底输出，避免整条消息变空
+    #[test]
+    fn analysis_only_still_yields_text() {
+        let mut t = StreamTranslator::new("m".into());
+        let mut ev = t.feed(&json!({
+            "id": "c1", "choices": [{"delta": {"content": "<analysis>只有思考</analysis>"}}]
+        }));
+        ev.extend(t.finish());
+        let text: String = ev.iter()
+            .filter(|e| e["delta"]["type"] == "text_delta")
+            .map(|e| e["delta"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(text, "只有思考");
+    }
+
+    #[test]
+    fn sanitize_internal_tags_non_stream() {
+        assert_eq!(
+            sanitize_internal_tags("<analysis>想\n</analysis><summary>结论</summary>"),
+            "结论"
+        );
+        // 无标签时原样返回
+        assert_eq!(sanitize_internal_tags("普通回答"), "普通回答");
     }
 
     // 文本 + 工具混排：所有 start 必须有配对的 stop

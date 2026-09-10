@@ -48,29 +48,23 @@ fn read_sessions() -> Vec<Session> {
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                     let state = v["state"].as_str().unwrap_or("").to_string();
+                    let ts = v["ts"].as_u64().unwrap_or(0);
                     let transcript = v["transcript"].as_str().unwrap_or("");
-                    // 所有状态都读尾部+mtime：working 态用于 Esc 中断检测与活跃度兜底/复活判断；
-                    // permission 态需要 mtime —— 批准后 transcript 继续写入（mtime > ts）即解冻，
-                    // 否则桌面端不发 PostToolUse、无人改写状态文件，alert 会永久冻结
-                    let (last_turn_line, transcript_mtime) = if transcript.is_empty() {
-                        (String::new(), 0)
+                    // 先取 mtime 再决定是否读尾部：TS 端只在 mtime > ts（hook 信号已过期）时才用
+                    // lastTurnLine，其余情况读 8KB 纯属浪费（陈旧会话的 transcript 可达数 MB）
+                    let transcript_mtime = if transcript.is_empty() {
+                        0
                     } else {
-                        (
-                            last_turn_line(transcript),
-                            std::fs::metadata(transcript)
-                                .and_then(|m| m.modified())
-                                .map(|t| {
-                                    t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
-                                })
-                                .unwrap_or(0),
-                        )
+                        std::fs::metadata(transcript)
+                            .and_then(|m| m.modified())
+                            .map(|t| {
+                                t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+                            })
+                            .unwrap_or(0)
                     };
-                    out.push(Session {
-                        state,
-                        ts: v["ts"].as_u64().unwrap_or(0),
-                        last_turn_line,
-                        transcript_mtime,
-                    });
+                    let last_turn_line =
+                        if transcript_mtime > ts { last_turn_line(transcript) } else { String::new() };
+                    out.push(Session { state, ts, last_turn_line, transcript_mtime });
                 }
             }
         }
