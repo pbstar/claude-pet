@@ -3,7 +3,18 @@
 本项目所有值得注意的变更都记录在此文件。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
-版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，菜单/安装包版本自动跟随）。
+版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）。
+
+## [0.1.0] - 2026-09-10
+
+### 移除
+
+- **本地模型代理**：`127.0.0.1:15721` HTTP 代理（anthropic 直通 / openai 协议转换）整体移除，CLI 与 Desktop 不再被接管请求通路；`settings.json` 亦不再写入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 等 env
+- **模型管理**：右键切换模型、模型管理小窗（增删改、连通性测试）及 `models.json` 配置体系
+- **Desktop 3p profile 写入**：不再改写 Claude Desktop 的 `deploymentMode` / `configLibrary`
+- Rust 依赖瘦身：移除 axum / reqwest / tokio / futures-util / bytes / uuid
+
+> 从 0.0.x 升级请按 README「已知限制」清理残留的 env 注入与旧配置，否则 CLI 会断连。
 
 ## [0.0.3] - 2026-09-09
 
@@ -47,6 +58,7 @@
 - hooks 信号失效时以 transcript 活跃度兜底，桌宠动画不僵死
 - 权限批准后徽标正确解除；Claude Desktop 模型选择器收敛为单条入口
 
+[0.1.0]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.0
 [0.0.3]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.3
 [0.0.2]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.2
 [0.0.1]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.1
