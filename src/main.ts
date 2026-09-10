@@ -3,7 +3,7 @@ import { aggregate } from "./state";
 import type { DisplayState } from "./state";
 import { fetchSessions } from "./poller";
 import { render } from "./renderer";
-import { restorePosition, rememberPosition } from "./window-pos";
+import { restorePosition, trackPosition } from "./window-pos";
 import "./menu";
 
 const POLL_INTERVAL_MS = 1000;
@@ -37,13 +37,18 @@ async function tick(): Promise<void> {
     console.error("poll failed:", e);
     apply("rest");
   }
-  void rememberPosition();
+}
+
+// 自调度而非 setInterval：上一轮没回来就不再叠加下一轮，避免慢 IPC 时并发堆积
+async function loop(): Promise<void> {
+  await tick();
+  setTimeout(() => void loop(), POLL_INTERVAL_MS);
 }
 
 async function boot(): Promise<void> {
   await restorePosition();
-  void tick();
-  setInterval(tick, POLL_INTERVAL_MS);
+  void trackPosition();
+  void loop();
 }
 
 void boot();

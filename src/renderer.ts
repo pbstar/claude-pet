@@ -11,6 +11,12 @@ let current: DisplayState | null = null;
 let frame = 0;
 let animTimer: number | null = null;
 
+// 预加载全部帧：否则首次进入 walking 时逐帧懒加载，第一轮动画会卡顿、闪一下
+for (let i = 0; i < FRAME_COUNT; i += 1) {
+  const img = new Image();
+  img.src = `/crab/${i}.png`;
+}
+
 function setFrame(i: number): void {
   crabEl.style.backgroundImage = `url(/crab/${i}.png)`;
 }

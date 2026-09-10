@@ -57,7 +57,7 @@ fn read_sessions() -> Vec<Session> {
                     }
                     let transcript = v["transcript"].as_str().unwrap_or("");
                     // 先取 mtime 再决定是否读尾部：TS 端只在 mtime > ts（hook 信号已过期）时才用
-                    // lastTurnLine，其余情况读 8KB 纯属浪费（陈旧会话的 transcript 可达数 MB）
+                    // lastTurnLine，其余情况白读 64KB 纯属浪费（陈旧会话的 transcript 可达数 MB）
                     let transcript_mtime = if transcript.is_empty() {
                         0
                     } else {
@@ -132,7 +132,9 @@ fn last_turn_line(path: &str) -> String {
     let Ok(size) = f.metadata().map(|m| m.len()) else {
         return String::new();
     };
-    const CHUNK: u64 = 8192;
+    // 64KB：单条 user/assistant 行可能很长（大 tool_result / 长消息），窗口太小会把
+    // 行首的 "type":"assistant" 切掉，导致过滤不到、turnDone 判定失效
+    const CHUNK: u64 = 64 * 1024;
     if f.seek(SeekFrom::Start(size.saturating_sub(CHUNK))).is_err() {
         return String::new();
     }
