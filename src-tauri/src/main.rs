@@ -41,8 +41,7 @@ struct Session {
 #[tauri::command]
 fn read_sessions() -> Vec<Session> {
     maybe_verify_hooks();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dir = PathBuf::from(home).join(".claude/claude-pet");
+    let dir = dirs_home().join(".claude/claude-pet");
     let mut out = Vec::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

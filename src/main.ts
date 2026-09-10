@@ -1,6 +1,5 @@
 import "./style.css";
-import { aggregate } from "./state";
-import type { DisplayState } from "./state";
+import { aggregate, type DisplayState } from "./state";
 import { fetchSessions } from "./poller";
 import { render } from "./renderer";
 import { restorePosition, trackPosition } from "./window-pos";
