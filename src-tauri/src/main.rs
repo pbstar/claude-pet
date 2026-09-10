@@ -9,6 +9,22 @@ use serde::Serialize;
 // 内嵌的 hook 脚本（编译期从 src-tauri/hook.sh 读入）
 const HOOK_SCRIPT: &str = include_str!("../hook.sh");
 
+// 需要注册进 settings.json 的事件：(事件名, hook 参数, 是否带 matcher "*")
+// 同一张表也是「hooks 是否齐全」的判据来源（见 pet_hooks_present），增删事件只改这里
+const EVENTS: &[(&str, &str, bool)] = &[
+    // 新会话/恢复会话即登记（带上 pid 便于死亡回收），并清掉 resume 可能残留的冻结状态
+    ("SessionStart", "start", false),
+    ("UserPromptSubmit", "thinking", false),
+    ("PreToolUse", "tool", true),
+    ("PostToolUse", "thinking", true),
+    ("Notification", "notify", false),
+    ("PermissionRequest", "permission", true),
+    // 压缩上下文期间模型在工作，否则桌宠会在压缩窗口里误显示为休息
+    ("PreCompact", "thinking", false),
+    ("Stop", "done", false),
+    ("SessionEnd", "clean", false),
+];
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Session {
@@ -192,7 +208,26 @@ fn maybe_verify_hooks() {
     ensure_hooks_installed();
 }
 
-// settings.json 的 hooks 里任一 command 引用 pet 目录即视为在位
+// EVENTS 里每个事件都必须在 settings.json 里挂着引用 pet 目录的 command 才算齐全。
+// 任一缺失都要重装：外部程序会整键丢弃 hooks，升级后也会新增事件（只查「任意一个在」
+// 会让新增的事件永远装不上）
+fn hooks_all_registered(v: &serde_json::Value) -> bool {
+    let Some(events) = v["hooks"].as_object() else {
+        return false;
+    };
+    let registered = |event: &str| {
+        events.get(event).and_then(|a| a.as_array()).is_some_and(|arr| {
+            arr.iter().any(|entry| {
+                entry["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter()
+                        .any(|h| h["command"].as_str().is_some_and(|c| c.contains(".claude/claude-pet")))
+                })
+            })
+        })
+    };
+    EVENTS.iter().all(|&(event, _, _)| registered(event))
+}
+
 fn pet_hooks_present() -> bool {
     let path = dirs_home().join(".claude/settings.json");
     let Ok(s) = fs::read_to_string(&path) else {
@@ -201,18 +236,10 @@ fn pet_hooks_present() -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
         return false;
     };
-    let Some(events) = v["hooks"].as_object() else {
-        return false;
-    };
-    events.values().filter_map(|a| a.as_array()).flatten().any(|entry| {
-        entry["hooks"].as_array().is_some_and(|hs| {
-            hs.iter()
-                .any(|h| h["command"].as_str().is_some_and(|c| c.contains(".claude/claude-pet")))
-        })
-    })
+    hooks_all_registered(&v)
 }
 
-// 首次启动自安装：写 hook.sh 到 ~/.claude/claude-pet/，并把 7 个事件 hook 合并进 settings.json
+// 首次启动自安装：写 hook.sh 到 ~/.claude/claude-pet/，并把 EVENTS 里的 hook 合并进 settings.json
 fn ensure_hooks_installed() {
     let home = dirs_home();
     let pet_dir = home.join(".claude/claude-pet");
@@ -263,16 +290,6 @@ fn ensure_hooks_installed() {
     }
 
     let hook_cmd = format!("bash '{}'", hook_dest.display());
-    const EVENTS: &[(&str, &str, bool)] = &[
-        // (事件名, hook 参数, 是否带 matcher "*")
-        ("UserPromptSubmit", "thinking", false),
-        ("PreToolUse", "tool", true),
-        ("PostToolUse", "thinking", true),
-        ("Notification", "notify", false),
-        ("PermissionRequest", "permission", true),
-        ("Stop", "done", false),
-        ("SessionEnd", "clean", false),
-    ];
 
     if settings.get("hooks").and_then(|h| h.as_object()).is_none() {
         settings["hooks"] = serde_json::json!({});
@@ -346,5 +363,43 @@ mod tests {
 
         // 带 pid 也设上限，防 pid 复用导致永不回收
         assert!(should_reap("done", now - MAX_AGE - 1, live_pid, now));
+    }
+
+    // 自愈判据：必须 EVENTS 全部在位，否则升级新增的事件永远装不上
+    #[test]
+    fn hooks_present_requires_every_event() {
+        let entry = |arg: &str| {
+            serde_json::json!({"hooks": [{
+                "type": "command",
+                "command": format!("bash '/u/.claude/claude-pet/hook.sh' {arg}")
+            }]})
+        };
+
+        // 一个都没有 → 不齐全
+        assert!(!hooks_all_registered(&serde_json::json!({})));
+        // 只有部分事件 → 不齐全（0.1.0 升级时缺 SessionStart/PreCompact 就是这种）
+        assert!(!hooks_all_registered(&serde_json::json!({
+            "hooks": { "Stop": [entry("done")] }
+        })));
+
+        // 全部事件到位 → 齐全
+        let mut hooks = serde_json::Map::new();
+        for &(event, arg, _) in EVENTS {
+            hooks.insert(event.to_string(), serde_json::json!([entry(arg)]));
+        }
+        assert!(hooks_all_registered(&serde_json::json!({ "hooks": hooks })));
+
+        // 同名事件里混着别人的 hook，不影响判定
+        let mut mixed = serde_json::Map::new();
+        for &(event, arg, _) in EVENTS {
+            mixed.insert(
+                event.to_string(),
+                serde_json::json!([
+                    entry(arg),
+                    { "hooks": [{ "type": "command", "command": "echo someone-else" }] }
+                ]),
+            );
+        }
+        assert!(hooks_all_registered(&serde_json::json!({ "hooks": mixed })));
     }
 }

@@ -1,9 +1,10 @@
 #!/bin/bash
 # claude-pet 状态 hook（极简，纯 shell，不依赖 node）
 # 事件参数由安装器在 settings.json 里指定；Claude 的 hook JSON 从 stdin 传入。
-# usage: hook.sh <thinking|tool|permission|done|notify|clean>
+# usage: hook.sh <thinking|tool|permission|done|notify|clean|start>
 #   - thinking/tool/permission/done：写会话状态文件
 #   - notify：仅当通知是权限提示时才写 permission（过滤 idle_prompt 等无关通知）
+#   - start：SessionStart 播种 idle，登记会话进程并覆盖 resume 可能残留的冻结状态
 #   - clean：删除会话状态（对应 SessionEnd）
 set -u
 DIR="$HOME/.claude/claude-pet"
@@ -11,7 +12,7 @@ mkdir -p "$DIR"
 
 arg="${1:-}"
 case "$arg" in
-  thinking|tool|permission|done|notify|clean) ;;
+  thinking|tool|permission|done|notify|clean|start) ;;
   # 无参/未知参数：不落盘，避免写出空状态污染状态目录
   *) exit 0 ;;
 esac
@@ -58,28 +59,22 @@ if [ -z "$transcript" ] && [ -f "$file" ]; then
   esac
 fi
 
-case "$arg" in
-  clean)
-    rm -f "$file"
-    rmdir "$DIR/.$sid.lock" 2>/dev/null
-    exit 0
-    ;;
-  notify)
-    # 按结构化的 notification_type 判定，而非全文匹配（message 文案会变，且可能含 allow 等词）
-    case "$input" in
-      *'"notification_type":"permission_prompt"'*) ;;
-      *'"notification_type":"worker_permission_prompt"'*) ;;
-      *) exit 0 ;;
-    esac
-    state="permission"
-    ;;
-  *)
-    state="$arg"
-    ;;
-esac
+# notify 的分类不需要旧状态，先判掉无关通知，免得为它们白抢一次锁
+if [ "$arg" = "notify" ]; then
+  case "$input" in
+    *'"notification_type":"permission_prompt"'*) ;;
+    *'"notification_type":"worker_permission_prompt"'*) ;;
+    # 字段在、但不是权限类（idle_prompt 等）→ 明确忽略
+    *'"notification_type"'*) exit 0 ;;
+    # 字段整体缺失（anthropics/claude-code#11964）才退回文案兜底，否则会漏报权限提示
+    *[Pp]ermission*) ;;
+    *) exit 0 ;;
+  esac
+fi
 
 # 串行化「读旧状态 → 判定 → 写新状态」：并行工具/子代理的 hook 会同时到达，
-# 不加锁时后写者会覆盖先写者（例如 tool 覆盖刚落盘的 permission）
+# 不加锁时后写者会覆盖先写者（例如 tool 覆盖刚落盘的 permission）。
+# 锁提到事件分发之前，clean 的删除也落在同一临界区，不会与并发写入交错
 lock="$DIR/.$sid.lock"
 locked=0
 i=0
@@ -91,6 +86,24 @@ done
 # 拿不到锁也照写：宁可短暂竞态，也不要卡住 hook（0.5s 后放弃等待）
 cleanup() { [ "$locked" = 1 ] && rmdir "$lock" 2>/dev/null; }
 trap cleanup EXIT
+
+case "$arg" in
+  clean)
+    rm -f "$file"
+    exit 0
+    ;;
+  start)
+    # SessionStart：播种 idle。新会话立刻登记（带上 pid 便于死亡回收），
+    # 同时覆盖 resume 时可能残留的冻结状态
+    state="idle"
+    ;;
+  notify)
+    state="permission"
+    ;;
+  *)
+    state="$arg"
+    ;;
+esac
 
 # 权限待批准期间丢弃「工作态」写入：等待批准时并行工具/子代理仍会触发 PreToolUse/PostToolUse，
 # 落盘的 tool/thinking 会覆盖尚未解除的 permission，状态在 alert/walking 间来回跳（黄灯闪跳）。
