@@ -3,7 +3,37 @@
 本项目所有值得注意的变更都记录在此文件。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
-版本号单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）。
+安装包版本单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）；`src-tauri/Cargo.toml` 的 crate 版本仅内部元数据，发版时同步。
+
+## [0.1.1] - 2026-09-10
+
+### 修复
+
+- **`settings.json` 可能被整份覆盖**：原逻辑解析失败时按空对象写回，会把用户的 `env` / `model` / `permissions` 全部抹掉。触发场景真实存在——Claude Desktop 改设置时会非原子重写该文件，此刻读到半截 JSON 即解析失败。现在解析失败直接放弃本次写入、留待 5s 后重试；自身写入改为 tmp + rename 原子替换
+- **hook 可能阻塞会话**：`hook.sh` 用 `cat` 读 stdin，stdin 不关闭时会永久阻塞，把整个 Claude 会话拖死。改为分片读 + 单次 1s 超时
+- **会话串号**：字段解析用贪婪 sed（`.*"key"...`）会命中最后一个匹配，工具入参里嵌套同名 `session_id` 时写错会话。改为只取首个匹配
+- **transcript 被清空导致权限态冻结**：部分事件 payload 不含 `transcript_path`，原逻辑会写成空串，TS 端因此丢掉 mtime 兜底，权限批准后只能干等 2h 超时。现在保留文件里已有的 transcript
+- **超长 transcript 行导致判定失效**：`last_turn_line` 只读尾部 8KB，单行超过 8KB 时行首的 `"type":"assistant"` 落在窗口外、`turnDone` 兜底失效。窗口放宽到 64KB
+- 无参 / 未知参数调用 `hook.sh` 会写出空状态文件污染状态目录（加参数守卫）
+- `session_id` 被直接当作文件名，理论上可路径穿越（改为字符白名单）
+- `transcript` 含引号 / 反斜杠会写出非法 JSON 而被 Rust 端静默丢弃（改为弃用该字段）
+
+### 新增
+
+- **僵尸会话回收**：`SessionEnd` 是唯一会删状态文件的 hook，强杀 / 关终端 / 崩溃时不会触发，残留会永久堆积（实测已积 7 个，`read_sessions` 每秒全量扫描越来越慢）。现在 hooks 落盘会话进程 `$PPID`，Rust 侧每秒 `kill(pid, 0)` 判存活，进程消失即回收
+- **`SessionStart` / `PreCompact` 事件**：新会话立刻登记（便于回收）并清掉 resume 残留的冻结状态；上下文压缩期间显示为工作中，不再误判休息
+- hooks 自愈判据从「任意事件在位」改为「9 个事件全部在位」，否则升级新增的事件永远装不上
+- 回收判据与自愈判据的单元测试（`cargo test`）
+
+### 优化
+
+- **位置落盘改事件驱动**：原每轮轮询都调一次 `outerPosition()`，窗口不动也白付一次 IPC；改为监听 `moved` 事件并去抖 300ms
+- **预加载 20 帧**：消除首次进入 walking 时的逐帧懒加载卡顿
+- **轮询改自调度**：`setInterval` → 自调度 `setTimeout`，慢 IPC 时不再并发叠加
+- **`notify` 文案兜底**：`notification_type` 字段整体缺失时（[claude-code#11964](https://github.com/anthropics/claude-code/issues/11964)）退回文案匹配，避免漏报权限提示；字段存在时仍严格按结构化值判定
+- **`clean` 纳入锁临界区**：不再与并发的 tool / thinking 写入交错
+- 清理死配置：`vite.config.ts` 空 `build` 段、`tsconfig.json` 未使用的 `resolveJsonModule`
+- README 重写：补三态说明表、排错表与开发说明
 
 ## [0.1.0] - 2026-09-10
 
@@ -56,6 +86,7 @@
 - hooks 信号失效时以 transcript 活跃度兜底，桌宠动画不僵死
 - 权限批准后徽标正确解除；Claude Desktop 模型选择器收敛为单条入口
 
+[0.1.1]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.0
 [0.0.3]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.3
 [0.0.2]: https://github.com/pbstar/claude-pet/releases/tag/v0.0.2
