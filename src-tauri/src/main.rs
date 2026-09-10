@@ -184,9 +184,27 @@ fn ensure_hooks_installed() {
     }
 
     // 2. 合并 hooks 到 settings.json（先剥离旧的再追加，幂等）
-    let mut settings = match fs::read_to_string(&settings_path) {
-        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
+    //    存在但读不动/解析失败时必须放弃本次写入：外部程序（实测 Claude Desktop 改设置时）
+    //    会非原子重写该文件，若此刻读到半截 JSON 就按空对象写回，用户的 env/model/permissions
+    //    会被整份抹掉。宁可这次不装 hooks（下次节流检查会重试），也不能动用户配置。
+    let mut settings = if settings_path.exists() {
+        match fs::read_to_string(&settings_path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "claude-pet: settings.json 解析失败（{e}），跳过本次 hooks 安装以保护用户配置"
+                    );
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("claude-pet: settings.json 读取失败（{e}），跳过本次 hooks 安装");
+                return;
+            }
+        }
+    } else {
+        serde_json::json!({})
     };
     if settings_path.exists() {
         let bak = settings_path.with_extension("json.bak-claude-pet");
@@ -238,7 +256,12 @@ fn ensure_hooks_installed() {
         arr.push(new_entry);
     }
 
+    // tmp + rename 原子替换：外部程序（Claude Desktop）与本进程都可能随时读 settings.json，
+    // 直接 fs::write 会先截断，读到半截文件的对方会解析失败
     if let Ok(s) = serde_json::to_string_pretty(&settings) {
-        let _ = fs::write(&settings_path, s);
+        let tmp = settings_path.with_extension("json.claude-pet.tmp");
+        if fs::write(&tmp, s).is_ok() {
+            let _ = fs::rename(&tmp, &settings_path);
+        }
     }
 }
