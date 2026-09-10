@@ -1,6 +1,7 @@
 [package]
 name = "claude-pet"
 description = "Claude Code 桌面指示灯（桌宠）"
+version = "0.0.3"
 edition = "2021"
 
 [build-dependencies]
