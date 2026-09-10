@@ -14,8 +14,6 @@
 - **Desktop 3p profile 写入**：不再改写 Claude Desktop 的 `deploymentMode` / `configLibrary`
 - Rust 依赖瘦身：移除 axum / reqwest / tokio / futures-util / bytes / uuid
 
-> 从 0.0.x 升级请按 README「已知限制」清理残留的 env 注入与旧配置，否则 CLI 会断连。
-
 ## [0.0.3] - 2026-09-09
 
 ### 修复

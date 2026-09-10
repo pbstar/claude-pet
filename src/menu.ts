@@ -16,7 +16,7 @@ async function buildMenu(): Promise<Menu> {
   return Menu.new({ items });
 }
 
-// 菜单项固定，首次构建后复用（旧版模型条目动态才需每次重建）
+// 菜单项固定（仅「退出 ClaudePet」），首次构建后复用
 let cached: Promise<Menu> | null = null;
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();

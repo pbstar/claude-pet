@@ -100,8 +100,6 @@ src-tauri/                # Rust 壳 + tauri.conf.json + Info.plist + hook.sh（
 
 - **仅 macOS**：`Info.plist` 为 macOS 形态，Windows / Linux 未适配
 
-> **从 0.0.x 升级注意**：0.0.x 版本内置本地模型代理，会在启动时往 `~/.claude/settings.json` 的 `env` 写入 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721` 与 `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`。0.1.0 已移除代理，若曾用过 0.0.x，请手动删除这两个键，否则 CLI 会因指向已不存在的代理而断连。另外可顺带清理：`~/.claude/claude-pet/models.json`（旧模型配置）与 Claude Desktop 的 `Claude-3p/configLibrary/00000000-0000-4000-8000-000000157210.json`（旧 3p profile）。
-
 ## 卸载
 
 1. 删除状态目录与 hook 脚本：
