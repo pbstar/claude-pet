@@ -5,13 +5,6 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use serde::Serialize;
-use tauri::Manager;
-
-mod convert;
-mod desktop_profile;
-mod models;
-mod proxy;
-mod stream;
 
 // 内嵌的 hook 脚本（编译期从 src-tauri/hook.sh 读入）
 const HOOK_SCRIPT: &str = include_str!("../hook.sh");
@@ -39,9 +32,13 @@ fn read_sessions() -> Vec<Session> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            // 只认 hook 写的 <uuid>.json；跳过 models.json、hook.sh 等同目录其他文件
+            // 只认 hook 写的 <uuid>.json；跳过 hook.sh 等同目录其他文件
             if path.extension().and_then(|e| e.to_str()) != Some("json")
-                || path.file_stem().and_then(|s| s.to_str()).map(|s| uuid::Uuid::parse_str(s).is_err()).unwrap_or(true)
+                || path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| !is_uuid(s))
+                    .unwrap_or(true)
             {
                 continue;
             }
@@ -70,6 +67,14 @@ fn read_sessions() -> Vec<Session> {
         }
     }
     out
+}
+
+// 8-4-4-4-12 十六进制段，够过滤 hook 产物即可，不追求严格 RFC 4122
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12])
+        && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 // transcript 尾部最后一条 user/assistant 行，用于识别 Esc 中断（"interrupted by user"）
@@ -101,205 +106,17 @@ fn quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-// ── 模型管理 invoke 命令（供 manager.html / 菜单使用）──
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelEntryDto {
-    id: String,
-    name: String,
-    format: models::UpstreamFormat,
-    base_url: String,
-    token: String,
-    model: String,
-    supports_1m: bool,
-    active: bool,
-}
-
-fn to_dto(state: &models::ModelsState) -> Vec<ModelEntryDto> {
-    let active_id = state.active_id.clone();
-    state
-        .models()
-        .iter()
-        .map(|m| ModelEntryDto {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            format: m.format,
-            base_url: m.base_url.clone(),
-            token: m.token.clone(),
-            model: m.model.clone(),
-            supports_1m: m.supports_1m,
-            active: active_id.as_deref() == Some(&m.id),
-        })
-        .collect()
-}
-
-#[tauri::command]
-fn list_models() -> Vec<ModelEntryDto> {
-    let state = models::ModelsState::load();
-    to_dto(&state)
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-fn save_model(
-    id: Option<String>,
-    name: String,
-    format: models::UpstreamFormat,
-    baseUrl: String,
-    token: String,
-    model: String,
-    supports1m: bool,
-) -> Result<(), String> {
-    let name = name.trim().to_string();
-    let base_url = baseUrl.trim().to_string();
-    let model = model.trim().to_string();
-    if name.is_empty() || base_url.is_empty() || model.is_empty() || token.is_empty() {
-        return Err("名称、Base URL、Token、模型名均为必填".into());
-    }
-    let mut state = models::ModelsState::load();
-    state
-        .upsert(id, name, format, base_url, token, model, supports1m)
-        .ok_or_else(|| "条目不存在".to_string())?;
-    state.save().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn delete_model(id: String) -> Result<(), String> {
-    let mut state = models::ModelsState::load();
-    state.remove(&id);
-    state.save().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-// 右键菜单点条目 = 只改 activeId，一个原子写
-#[tauri::command]
-fn switch_model(id: String) -> Result<bool, String> {
-    let mut state = models::ModelsState::load();
-    let ok = state.set_active(&id);
-    if ok {
-        state.save().map_err(|e| e.to_string())?;
-    }
-    Ok(ok)
-}
-
-#[tauri::command]
-fn proxy_status() -> bool {
-    proxy::is_running()
-}
-
-// 菜单状态项显示端口用：地址单一来源是 models::PROXY_ADDR，避免前端硬编码脱节
-#[tauri::command]
-fn proxy_addr() -> String {
-    models::PROXY_ADDR.to_string()
-}
-
-// 管理弹窗「测试」：用表单当前值探测上游连通性（不落盘）
-#[tauri::command]
-#[allow(non_snake_case)]
-async fn test_model(
-    format: models::UpstreamFormat,
-    baseUrl: String,
-    token: String,
-    model: String,
-) -> Result<String, String> {
-    proxy::check_connectivity(format, baseUrl, token, model).await
-}
-
-// 菜单右键触发重试绑定（端口空出来后，无需重启 pet 即可恢复）
-// 绑定成功时补做一次配置校正——首启绑定失败时配置没写，这里兜底
-#[tauri::command]
-async fn retry_proxy() -> bool {
-    if proxy::is_running() {
-        return true;
-    }
-    if proxy::spawn().await {
-        ensure_models_file();
-        models::ensure_code_settings();
-        desktop_profile::ensure_desktop_profile();
-        true
-    } else {
-        false
-    }
-}
-
-#[tauri::command]
-fn open_manager(app: tauri::AppHandle) {
-    open_manager_window(&app);
-}
-
-// 管理小窗：按需创建第二个 WebView 小窗，关即销毁
-// always_on_top 必开：本应用是 LSUIElement 后台应用，无法成为活动应用，
-// 普通窗口即使 set_focus 也压在前台软件的窗口后面（表现为"弹窗没出现"）
-fn open_manager_window(app: &tauri::AppHandle) {
-    use tauri::WebviewUrl;
-    if let Some(win) = app.get_webview_window("manager") {
-        let _ = win.set_focus();
-        return;
-    }
-    let _ = tauri::WebviewWindowBuilder::new(
-        app,
-        "manager",
-        WebviewUrl::App("manager.html".into()),
-    )
-    .title("模型管理")
-    .inner_size(420.0, 560.0)
-    .resizable(false)
-    .always_on_top(true)
-    .focused(true)
-    .build();
-}
-
-// ── 启动装配（先绑端口，成功才写配置）──
-
 fn main() {
     ensure_hooks_installed();
 
-    // tokio runtime：代理服务 + 启动期安装流程
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let proxy_up = rt.block_on(proxy::spawn());
-
-    if proxy_up {
-        // 顺序：models.json（含 token 生成）→ settings.json → Desktop profile（依赖 token，必须在最后）
-        ensure_models_file();
-        models::ensure_code_settings();
-        desktop_profile::ensure_desktop_profile();
-    } else {
-        eprintln!("claude-pet: proxy not started, skip config sync (settings untouched)");
-    }
-
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            read_sessions,
-            quit,
-            list_models,
-            save_model,
-            delete_model,
-            switch_model,
-            proxy_status,
-            proxy_addr,
-            test_model,
-            retry_proxy,
-            open_manager
-        ])
+        .invoke_handler(tauri::generate_handler![read_sessions, quit])
         .run(tauri::generate_context!())
         .expect("error while running ClaudePet");
 }
 
-// models.json：不存在则建空列表；desktopToken 不存在则生成
-fn ensure_models_file() {
-    let dir = dirs_home().join(".claude/claude-pet");
-    let _ = fs::create_dir_all(&dir);
-    let mut state = models::ModelsState::load();
-    if state.desktop_token().is_empty() {
-        state.ensure_token();
-    }
-    let _ = state.save();
-}
-
 fn dirs_home() -> PathBuf {
-    models::dirs_home()
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
 // ── hooks 自愈 ──
@@ -348,10 +165,7 @@ fn pet_hooks_present() -> bool {
 
 // 首次启动自安装：写 hook.sh 到 ~/.claude/claude-pet/，并把 7 个事件 hook 合并进 settings.json
 fn ensure_hooks_installed() {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let home = PathBuf::from(home);
+    let home = dirs_home();
     let pet_dir = home.join(".claude/claude-pet");
     let hook_dest = pet_dir.join("hook.sh");
     let settings_path = home.join(".claude/settings.json");
