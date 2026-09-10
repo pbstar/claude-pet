@@ -11,6 +11,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 仅用于 kill(pid, 0) 判定会话进程存活（僵尸状态文件回收），已是 tauri 的传递依赖
+libc = "0.2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

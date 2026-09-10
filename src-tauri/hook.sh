@@ -115,7 +115,11 @@ if [ "$state" = "thinking" ] || [ "$state" = "tool" ]; then
   fi
 fi
 
+# 本 hook 由 Claude Code 直接 spawn（sh -c 的单条命令会被 exec 优化，无中间层），
+# 所以 $PPID 就是该会话的 claude 进程；Rust 端据此 kill(pid,0) 回收死亡会话的状态文件
+pid="${PPID:-0}"
+
 tmp="$file.tmp.$$"
-printf '{"state":"%s","ts":%s,"transcript":"%s"}\n' \
-  "$state" "$(date +%s)" "$transcript" > "$tmp"
+printf '{"state":"%s","ts":%s,"transcript":"%s","pid":%s}\n' \
+  "$state" "$(date +%s)" "$transcript" "$pid" > "$tmp"
 mv -f "$tmp" "$file"

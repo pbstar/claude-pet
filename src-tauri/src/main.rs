@@ -28,6 +28,10 @@ fn read_sessions() -> Vec<Session> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = PathBuf::from(home).join(".claude/claude-pet");
     let mut out = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -46,6 +50,11 @@ fn read_sessions() -> Vec<Session> {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
                     let state = v["state"].as_str().unwrap_or("").to_string();
                     let ts = v["ts"].as_u64().unwrap_or(0);
+                    // 会话进程已死（或无 pid 的旧文件过期）→ 删除状态文件，state.d 自清理
+                    if should_reap(&state, ts, v["pid"].as_u64().unwrap_or(0), now) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
                     let transcript = v["transcript"].as_str().unwrap_or("");
                     // 先取 mtime 再决定是否读尾部：TS 端只在 mtime > ts（hook 信号已过期）时才用
                     // lastTurnLine，其余情况读 8KB 纯属浪费（陈旧会话的 transcript 可达数 MB）
@@ -75,6 +84,44 @@ fn is_uuid(s: &str) -> bool {
     parts.len() == 5
         && parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12])
         && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+// ── 僵尸会话回收 ──
+// SessionEnd（clean）是唯一会删状态文件的 hook，强杀/关终端/崩溃时它不会触发，残留文件会
+// 永久堆积——read_sessions 每秒全量扫描，越用越慢。这里按「会话进程是否还活着」回收。
+// 判据刻意保守，宁可晚删也不误删正在显示的会话：
+//   dead    有 pid 且进程已消失；无 pid 的旧文件（0.1.0 前）按年龄兜底
+//   settled 原始状态已经停下来；工作/等授权态要超过 TS 端最长超时（permission 2h）才允许回收
+const MAX_ACTIVE_AGE: u64 = 2 * 60 * 60; // 与 TS 端 PERMISSION_TIMEOUT 对齐
+const LEGACY_AGE: u64 = 24 * 60 * 60; // 无 pid 的旧文件：24h 后视为残留
+const MAX_AGE: u64 = 7 * 24 * 60 * 60; // 带 pid 也设上限，防 pid 复用导致永不回收
+
+fn should_reap(state: &str, ts: u64, pid: u64, now: u64) -> bool {
+    let settled =
+        !matches!(state, "thinking" | "tool" | "permission") || now.saturating_sub(ts) > MAX_ACTIVE_AGE;
+    let dead = if pid > 0 {
+        !pid_alive(pid) || now.saturating_sub(ts) > MAX_AGE
+    } else {
+        now.saturating_sub(ts) > LEGACY_AGE
+    };
+    dead && settled
+}
+
+// kill(pid, 0)：返回 0 说明进程存在；EPERM 说明存在但无权限发信号（同样算活着）
+#[cfg(unix)]
+fn pid_alive(pid: u64) -> bool {
+    if pid == 0 || pid > i32::MAX as u64 {
+        return false;
+    }
+    // 先存返回值再读 errno：中间不能插入其它可能改动 errno 的调用
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+// 非 unix 平台没有可靠的存活探测，保守认为活着（不回收）
+#[cfg(not(unix))]
+fn pid_alive(_pid: u64) -> bool {
+    true
 }
 
 // transcript 尾部最后一条 user/assistant 行，用于识别 Esc 中断（"interrupted by user"）
@@ -263,5 +310,39 @@ fn ensure_hooks_installed() {
         if fs::write(&tmp, s).is_ok() {
             let _ = fs::rename(&tmp, &settings_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 回收会真删用户的状态文件，判据必须锁死：只回收「进程确实死了 且 状态已停下」的会话
+    #[test]
+    fn reaps_only_dead_and_settled_sessions() {
+        let now = 1_000_000u64;
+        let dead_pid = u64::MAX; // 超出 pid_t 范围 → pid_alive 必为 false
+        let live_pid = 1; // launchd，必然存在
+
+        // 进程活着、状态已停 → 保留
+        assert!(!should_reap("done", now - 10, live_pid, now));
+        // 进程活着、工作中 → 保留
+        assert!(!should_reap("tool", now - 10, live_pid, now));
+
+        // 进程已死、状态已停 → 立即回收（这正是强杀会话产生的僵尸文件）
+        assert!(should_reap("done", now - 10, dead_pid, now));
+
+        // 进程已死但仍在工作态、且没超过 2h → 先保留，不误删正在显示的会话
+        assert!(!should_reap("thinking", now - 10, dead_pid, now));
+        assert!(!should_reap("permission", now - 10, dead_pid, now));
+        // 工作态超过 2h（与 TS 端 PERMISSION_TIMEOUT 对齐）→ 允许回收
+        assert!(should_reap("permission", now - MAX_ACTIVE_AGE - 1, dead_pid, now));
+
+        // 无 pid 的 0.1.0 前旧文件：按年龄兜底
+        assert!(!should_reap("done", now - 10, 0, now));
+        assert!(should_reap("done", now - LEGACY_AGE - 1, 0, now));
+
+        // 带 pid 也设上限，防 pid 复用导致永不回收
+        assert!(should_reap("done", now - MAX_AGE - 1, live_pid, now));
     }
 }
