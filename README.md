@@ -58,27 +58,35 @@ hooks 脚本内嵌在二进制中（`src-tauri/hook.sh` 经 `include_str!` 编�
 ## 工作原理
 
 ```
-Claude Code hooks（shell）                  ClaudePet.app
-  UserPromptSubmit / PostToolUse → thinking
-  PreToolUse                     → tool     → 1s 轮询 read_sessions
-  Notification / PermissionRequest → permission   ├─ state.ts    纯函数 FSM
-  Stop                           → done     │  ├─ poller.ts   轮询调度
-  SessionEnd                     → 清理     │  └─ renderer.ts 三态渲染
-        ↓ 原子写                            ↓
-  ~/.claude/claude-pet/<session_id>.json    三态渲染（走 / ❗ / 趴）
+Claude Code hooks（shell）                     ClaudePet.app
+  SessionStart                    → idle
+  UserPromptSubmit / PostToolUse  → thinking
+  PreToolUse                      → tool      → 1s 轮询 read_sessions
+  PreCompact                      → thinking  ├─ state.ts    纯函数 FSM
+  Notification / PermissionRequest → permission│  ├─ poller.ts   轮询调度
+  Stop                            → done      │  └─ renderer.ts 三态渲染
+  SessionEnd                      → 清理      ↓
+        ↓ 原子写（带上会话进程 pid）
+  ~/.claude/claude-pet/<session_id>.json      三态渲染（走 / ❗ / 趴）
 ```
 
 - hooks 用「tmp + rename」原子写，读不到半截 JSON
 - 聚合优先级：任意 `permission` > 任意 `working` > `rest`（等授权的会话永不被工作中掩盖）
+- 状态文件带会话进程 pid，`<uuid>.json` 即一个会话，`state.d` 自清理
 
 ### 健壮性设计
 
 | 场景 | 兜底机制 |
 |---|---|
+| 会话被强杀 / 关终端 / 崩溃（SessionEnd 不触发） | 状态文件记 `$PPID`（即该会话的 claude 进程），每秒 `kill(pid,0)` 判存活，进程消失即删除文件；工作/等授权态需超 2h 才回收，避免误删正在显示的会话 |
 | hook 进程被强杀 | working 超 15 分钟、permission 超 2 小时自动归为休息 |
 | Code tab 不触发工具类 hook / hook 写盘被沙箱拦截 | transcript 活跃度兜底：以 jsonl 的 mtime ≤120s 判会话仍在推进；尾部出现 `stop_reason:end_turn` 则归为休息 |
-| `settings.json` 被外部程序整键丢弃 hooks | 每 5s 节流校验一次，丢失即自动重装 |
+| `settings.json` 被外部程序整键丢弃 hooks | 每 5s 节流校验一次，`EVENTS` 里任一事件缺失即自动重装 |
+| `settings.json` 被外部程序非原子重写，读到半截 JSON | 解析失败即放弃本次写入（绝不按空对象写回，否则会抹掉用户的 `env` / `model` / `permissions`），留待 5s 后重试；自身写入走 tmp + rename |
+| hook 的 stdin 不关闭 | 分片读 + 单次 1s 超时，最多等 1s 就放弃，绝不拖住会话 |
+| 事件 payload 缺 `transcript_path` | 保留状态文件里已有的 transcript，不覆盖 |
 | 权限批准后状态冻结 | permission 态补读 transcript mtime，`mtime > ts` 即解冻 |
+
 
 ## 目录结构
 
@@ -93,7 +101,7 @@ src/                      # TS 业务逻辑
   style.css               # 主窗样式
 public/crab/              # 20 帧螃蟹素材（自 claude-status-bar 导出）
 src-tauri/                # Rust 壳 + tauri.conf.json + Info.plist + hook.sh（内嵌）
-  src/main.rs             # 命令注册、hooks 安装与自愈
+  src/main.rs             # 命令注册、hooks 安装与自愈、僵尸会话回收
 ```
 
 ## 已知限制
