@@ -5,6 +5,21 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 安装包版本单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）；`src-tauri/Cargo.toml` 的 crate 版本仅内部元数据，发版时同步。
 
+## [未发布]
+
+### 修复
+
+- **授权处理完仍举黄灯，最长挂满 2 小时**：`permission` 只有 `SessionEnd` / transcript 推进 / 2h 超时三条出路，而桌面端三条都容易失效——切走会话而不关标签页时 `SessionEnd` 不触发，transcript 又按批落盘（实测可滞后分钟级）。现在：
+  - 状态文件记下待授权工具的 `tool_use_id`，该工具自己的后续 `PostToolUse` 一到即解冻，不再依赖 transcript 落盘时机
+  - 授权请求被 `Notification` 二次覆盖、payload 不带 id 时，沿用上一份状态里的 `tool_use_id`，避免 id 被抹掉后退化成干等转录
+  - Esc 打断与权限写入落在同一秒（`mtime == ts`）时也读 transcript 尾部：中断 / 答完标记即为解冻证据，不再干等 2h
+- **用户点「拒绝」没有任何信号**：新增 `PermissionDenied` 事件，拒绝后立即按工作中重新解析（事件数 9 → 10）
+- Rust 侧读 transcript 尾部的闸门放宽到同秒（`>=`），支撑上面的同秒解冻；陈旧会话仍不白读 64KB
+
+### 文档
+
+- README 更正：桌面端 Code tab **会**触发工具类 hook（实测 `PreToolUse` / `PostToolUse` / `PermissionRequest` 均触发），transcript 兜底的真实定位是「hooks 被沙箱拦截 / 失效」
+
 ## [0.1.1] - 2026-09-10
 
 ### 修复

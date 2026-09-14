@@ -19,6 +19,8 @@ const EVENTS: &[(&str, &str, bool)] = &[
     ("PostToolUse", "thinking", true),
     ("Notification", "notify", false),
     ("PermissionRequest", "permission", true),
+    // 用户在权限弹窗上点「拒绝」——该授权请求已终结，没有这条事件黄灯会一直举到超时
+    ("PermissionDenied", "denied", true),
     // 压缩上下文期间模型在工作，否则桌宠会在压缩窗口里误显示为休息
     ("PreCompact", "thinking", false),
     ("Stop", "done", false),
@@ -71,8 +73,8 @@ fn read_sessions() -> Vec<Session> {
                         continue;
                     }
                     let transcript = v["transcript"].as_str().unwrap_or("");
-                    // 先取 mtime 再决定是否读尾部：TS 端只在 mtime > ts（hook 信号已过期）时才用
-                    // lastTurnLine，其余情况白读 64KB 纯属浪费（陈旧会话的 transcript 可达数 MB）
+                    // 先取 mtime 再决定是否读尾部：多数情况只有 mtime 越过 ts（hook 信号已过期）时
+                    // TS 端才用 lastTurnLine，其余白读 64KB 纯属浪费（陈旧 transcript 可达数 MB）
                     let transcript_mtime = if transcript.is_empty() {
                         0
                     } else {
@@ -83,8 +85,11 @@ fn read_sessions() -> Vec<Session> {
                             })
                             .unwrap_or(0)
                     };
-                    let last_turn_line =
-                        if transcript_mtime > ts { last_turn_line(transcript) } else { String::new() };
+                    let last_turn_line = if tail_needed(transcript_mtime, ts) {
+                        last_turn_line(transcript)
+                    } else {
+                        String::new()
+                    };
                     out.push(Session { state, ts, last_turn_line, transcript_mtime });
                 }
             }
@@ -137,6 +142,13 @@ fn pid_alive(pid: u64) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u64) -> bool {
     true
+}
+
+// 是否需要读 transcript 尾部供 TS 端判定：hook 信号已过期（mtime 越过 ts），或**同秒**——用户
+// 按 Esc 打断一个待授权工具时，打断标记与权限写入经常落在同一秒，mtime == ts 时 TS 端只能靠
+// 尾部的中断标记把冻结的 permission 解开。ts 为 0（状态文件异常）时不读
+fn tail_needed(transcript_mtime: u64, ts: u64) -> bool {
+    ts > 0 && transcript_mtime >= ts
 }
 
 // transcript 尾部最后一条 user/assistant 行，用于识别 Esc 中断（"interrupted by user"）
@@ -362,6 +374,17 @@ mod tests {
 
         // 带 pid 也设上限，防 pid 复用导致永不回收
         assert!(should_reap("done", now - MAX_AGE - 1, live_pid, now));
+    }
+
+    // 尾部读取闸门：同秒必须读——Esc 打断与权限写入常落在同一秒，漏读就没法靠中断标记解冻
+    #[test]
+    fn tail_read_covers_same_second() {
+        let ts = 1_000_000u64;
+        assert!(tail_needed(ts, ts)); // 同秒：打断标记与权限写入同秒
+        assert!(tail_needed(ts + 1, ts)); // 转录更新
+        assert!(!tail_needed(ts - 1, ts)); // 转录比 hook 旧，读了也没用
+        assert!(!tail_needed(ts, 0)); // ts 为 0：状态文件不可信
+        assert!(!tail_needed(0, ts)); // 读不到 transcript
     }
 
     // 自愈判据：必须 EVENTS 全部在位，否则升级新增的事件永远装不上

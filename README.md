@@ -53,7 +53,7 @@ hook 脚本内嵌在二进制里（`src-tauri/hook.sh` 经 `include_str!` 编译
 ### 首次启动
 
 1. 把 `ClaudePet.app` 拖进「应用程序」
-2. 双击启动 —— 会自动安装 hooks：写 `~/.claude/claude-pet/hook.sh`，并把 9 个事件合并进 `~/.claude/settings.json`（首次会备份原文件为 `settings.json.bak-claude-pet`）
+2. 双击启动 —— 会自动安装 hooks：写 `~/.claude/claude-pet/hook.sh`，并把 10 个事件合并进 `~/.claude/settings.json`（首次会备份原文件为 `settings.json.bak-claude-pet`）
 3. 在 Claude Code 里开一个**新会话**，桌面上就会出现螃蟹（已在运行的会话不会热加载 hooks，新会话立即生效）
 
 > 应用无 Dock 图标、无菜单栏图标，只悬浮在桌面上。**退出方式：右键螃蟹 → 退出 ClaudePet。**
@@ -68,6 +68,7 @@ Claude Code hooks（shell）
   PreToolUse                        → tool
   PreCompact                        → thinking
   Notification / PermissionRequest  → permission
+  PermissionDenied                  → thinking（拒绝也是「授权已处理」）
   Stop                              → done
   SessionEnd                        → 清理
         │
@@ -80,7 +81,7 @@ Claude Code hooks（shell）
   state.ts（纯函数 FSM）→ renderer.ts（三态渲染：走 / ❗ / 趴）
 ```
 
-每个会话一个状态文件，`<uuid>.json` 即一个会话。hooks 用「tmp + rename」原子写，读端不会看到半截 JSON；Rust 侧每秒读一次目录，聚合与超时判定都在 TS 的纯函数 `state.ts` 里完成。
+每个会话一个状态文件，`<uuid>.json` 即一个会话。hooks 用「tmp + rename」原子写，读端不会看到半截 JSON；Rust 侧每秒读一次目录，聚合与超时判定都在 TS 的纯函数 `state.ts` 里完成。状态文件额外记下待授权工具的 `tool_use_id`，hook 侧据此判定这笔授权是否已被处理。
 
 ### 健壮性设计
 
@@ -88,9 +89,10 @@ Claude Code hooks（shell）
 |---|---|
 | 会话被强杀 / 关终端 / 崩溃（`SessionEnd` 不触发） | 状态文件记 `$PPID`（即该会话的 claude 进程），每秒 `kill(pid,0)` 判存活，进程消失即删文件；工作 / 等授权态需超 2h 才回收，避免误删正在显示的会话 |
 | hook 进程被强杀 | working 超 15 分钟、permission 超 2 小时自动归为休息 |
-| Code tab 不触发工具类 hook / hook 写盘被沙箱拦截 | transcript 活跃度兜底：jsonl 的 mtime ≤120s 视为会话仍在推进；尾部出现 `stop_reason:end_turn` 则归为休息 |
-| 权限批准后状态冻结 | permission 态补读 transcript mtime，`mtime > ts` 即解冻 |
-| `settings.json` 被外部程序整键丢弃 hooks | 每 5s 节流校验一次，9 个事件里任一缺失即自动重装 |
+| hook 写盘被沙箱拦截 / hooks 失效 | transcript 活跃度兜底：jsonl 的 mtime ≤120s 视为会话仍在推进；尾部出现 `stop_reason:end_turn` 或 Esc 中断标记则归为休息 |
+| 权限批准 / 拒绝后状态冻结 | 状态文件记下待授权工具的 `tool_use_id`，该工具自己的后续事件（`PostToolUse` / `PermissionDenied`）一到即解冻——不依赖 transcript 落盘时机（桌面端实测可滞后分钟级）。授权请求若由 `Notification` 二次覆盖而不带 id，则沿用上一份状态里的 |
+| Esc 打断与权限写入落在同一秒 | permission 解冻额外接受「同秒 + 尾部已是终局」：打断标记或 `end_turn` 即为证据，不再干等 2h 超时 |
+| `settings.json` 被外部程序整键丢弃 hooks | 每 5s 节流校验一次，10 个事件里任一缺失即自动重装 |
 | `settings.json` 被外部程序非原子重写，读到半截 JSON | 解析失败即放弃本次写入（绝不按空对象写回，否则会抹掉用户的 `env` / `model` / `permissions`），留待 5s 后重试；自身写入走 tmp + rename |
 | hook 的 stdin 不关闭 | 分片读 + 单次 1s 超时，最多等 1s 就放弃，绝不拖住会话 |
 | 事件 payload 缺 `transcript_path` | 保留状态文件里已有的 transcript，不覆盖 |
@@ -114,7 +116,7 @@ cd src-tauri && cargo test    # 回收判据 / hooks 自愈判据的单元测试
 | 现象 | 排查 |
 |---|---|
 | 螃蟹一直趴着 | 确认 Claude Code 里有**新开**的会话（已运行的会话不热加载 hooks）；看 `ls ~/.claude/claude-pet/` 有没有 `<uuid>.json`；重启应用会重装 hooks |
-| 一直举 ❗ 不消失 | 授权后需要 transcript 有写入才会解冻，最多 2h 自动归位。若 transcript 路径读不到（如被沙箱挡住），会退化成等超时 |
+| 一直举 ❗ 不消失 | 授权被处理（批准 / 拒绝 / Esc 打断）后一两秒内应归位；工具本身跑得久时，要等它跑完（`PostToolUse`）才灭。仍不消失就看那个会话是否真挂着待授权——桌面端会话只是切走、并没有关闭时，`SessionEnd` 不触发，状态文件会一直留着；最晚 2h 自动归位 |
 | 动画偶尔抖动 | 权限待批准期间会丢弃并发的工具态写入，这是刻意的抗抖动设计 |
 | 想完全重置 | `rm -rf ~/.claude/claude-pet` 后重启应用 |
 

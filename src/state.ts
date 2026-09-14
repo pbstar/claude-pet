@@ -27,19 +27,31 @@ function turnDone(s: RawSession): boolean {
   return s.lastTurnLine.includes('"type":"assistant"') && TURN_DONE_RE.test(s.lastTurnLine);
 }
 
+// transcript 尾部是否已停在终局：本轮答完，或被用户打断
+function terminal(s: RawSession): boolean {
+  return s.lastTurnLine.includes(INTERRUPT_MARKER) || turnDone(s);
+}
+
 export function effectiveState(s: RawSession, now: number): string {
-  // permission 解冻：批准后 transcript 必然继续写入（mtime > ts），但桌面端不发 PostToolUse、
-  // 无人改写状态文件 → permission 会冻结成 alert。按工作中重新解析，走下方兜底链
-  const st = s.state === "permission" && s.transcriptMtime > s.ts ? "thinking" : s.state;
+  // hook 之后 transcript 是否有推进。严格大于：同秒无法判定先后，不能当成「绕过 hook 信号」的
+  // 依据（发送窗口里尾部还是上一轮内容，会被误判成休息）
+  const advanced = s.transcriptMtime > s.ts;
+  // 唯一的例外：状态是 permission、且尾部已停在终局。用户按 Esc 打断一个待授权工具时，打断标记
+  // 与权限写入经常落在同一秒（mtime == ts），严格大于的判据会把解冻路彻底挡死——黄灯一直举到 2h
+  // 超时。此时尾部的中断/答完标记是「这次授权已终结」的确凿证据，足以解冻
+  const evidence =
+    advanced || (s.state === "permission" && s.ts > 0 && s.transcriptMtime === s.ts && terminal(s));
+
+  // permission 解冻：批准后 transcript 必然继续写入，或尾部已见终局标记。桌面端 hook 信号可能
+  // 迟到、transcript 也按批落盘，冻结期间不做解冻会把黄灯挂满整个 2h
+  const st = s.state === "permission" && evidence ? "thinking" : s.state;
 
   if (st === "thinking" || st === "tool") {
-    // transcript 兜底仅在 hook 信号已过期（transcript 比状态文件新）时生效。
+    // transcript 兜底仅在 hook 信号已过期（transcript 已越过状态文件）时生效。
     // Sending/Waiting 阶段尾部仍是上一轮内容（end_turn/中断标记），而 hook 刚落盘的
     // thinking 是最新事实，不能被旧尾部推翻（否则螃蟹在发送窗口误判休息、定住不动）
-    if (s.transcriptMtime > s.ts) {
-      if (s.lastTurnLine.includes(INTERRUPT_MARKER)) return "rest";
-      // Stop hook 没落盘（hooks 失效）但 CLI 已答完本轮 → 休息
-      if (turnDone(s)) return "rest";
+    if (evidence) {
+      if (terminal(s)) return "rest";
       // hook 冻结但 transcript 仍在刷新 → 工作中（覆盖 15 分钟超时，长任务不误判休息）
       if (transcriptLive(s, now)) return st;
     }
@@ -49,9 +61,9 @@ export function effectiveState(s: RawSession, now: number): string {
   if (st === "permission") {
     return now - s.ts > PERMISSION_TIMEOUT ? "rest" : "permission";
   }
-  // done/idle/未知：hooks 死后用户又发了新消息（transcript 比状态文件新、未答完、仍在刷新）
+  // done/idle/未知：hooks 死后用户又发了新消息（transcript 比状态文件新、未到终局、仍在刷新）
   // → 复活为工作中。hooks 在位时 Stop 必晚于 transcript 写入（ts >= mtime），不会误触发
-  if (s.transcriptMtime > s.ts && !turnDone(s) && transcriptLive(s, now)) return "thinking";
+  if (advanced && !terminal(s) && transcriptLive(s, now)) return "thinking";
   return "rest";
 }
 
