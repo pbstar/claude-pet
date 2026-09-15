@@ -177,6 +177,26 @@ fn last_turn_line(path: &str) -> String {
         .to_string()
 }
 
+// 把 Claude Desktop 带到前台：已运行则激活它，未运行则启动。
+// 仅 macOS 有意义——按 bundle id 定位应用是 LaunchServices（open -b）的能力，本项目也只发布 macOS
+#[tauri::command]
+fn focus_desktop_app() {
+    #[cfg(target_os = "macos")]
+    {
+        // 写死绝对路径：.app 由 Finder 启动时 PATH 取 launchd 的默认值，未必解析得到 open
+        let spawned = std::process::Command::new("/usr/bin/open")
+            .args(["-b", "com.anthropic.claudefordesktop"])
+            .spawn();
+        // 不检查结果：用户没装 Claude Desktop 时静默失败即可，不该影响桌宠本身。
+        // 但子进程必须回收，否则长驻的桌宠会攒下一堆僵尸进程
+        if let Ok(mut child) = spawned {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
     app.exit(0);
@@ -186,7 +206,7 @@ fn main() {
     ensure_hooks_installed();
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_sessions, quit])
+        .invoke_handler(tauri::generate_handler![read_sessions, focus_desktop_app, quit])
         .run(tauri::generate_context!())
         .expect("error while running ClaudePet");
 }

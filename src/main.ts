@@ -3,6 +3,7 @@ import { aggregate, type DisplayState } from "./state";
 import { fetchSessions } from "./poller";
 import { render } from "./renderer";
 import { restorePosition, trackPosition } from "./window-pos";
+import { bindOpenClaude } from "./desktop-app";
 import "./menu";
 
 const POLL_INTERVAL_MS = 1000;
@@ -47,6 +48,7 @@ async function loop(): Promise<void> {
 async function boot(): Promise<void> {
   await restorePosition();
   void trackPosition();
+  bindOpenClaude();
   void loop();
 }
 

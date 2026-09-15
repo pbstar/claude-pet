@@ -5,6 +5,13 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 安装包版本单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）；`src-tauri/Cargo.toml` 的 crate 版本仅内部元数据，发版时同步。
 
+## [未发布]
+
+### 新增
+
+- **双击桌宠唤起 Claude Desktop**：等授权时不用再去翻窗口，双击螃蟹即可把 Claude Desktop 带到前台（未运行则启动它）。右键菜单同步加了「打开 Claude Desktop」，与双击复用同一实现
+- 唤起落在 Rust 侧新增的 `focus_desktop_app` 命令（`open -b com.anthropic.claudefordesktop`）：WebView 里没有 Node 也没有 shell 权限，动作只能由 Rust 侧发起。用自定义命令而非 shell / opener 插件，依赖与 `capabilities` 均无需变动
+
 ## [0.1.2] - 2026-09-14
 
 ### 修复

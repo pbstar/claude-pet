@@ -2,9 +2,15 @@
 // 可从任意位置弹出并支持子菜单/勾选项，扩展菜单时直接往 items 数组加项即可
 import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { invoke } from "@tauri-apps/api/core";
+import { openClaudeDesktop } from "./desktop-app";
 
 async function buildMenu(): Promise<Menu> {
   const items: MenuItem[] = [
+    await MenuItem.new({
+      id: "open-claude",
+      text: "打开 Claude Desktop",
+      action: openClaudeDesktop,
+    }),
     await MenuItem.new({
       id: "quit",
       text: "退出 ClaudePet",
@@ -16,7 +22,7 @@ async function buildMenu(): Promise<Menu> {
   return Menu.new({ items });
 }
 
-// 菜单项固定（仅「退出 ClaudePet」），首次构建后复用
+// 菜单项固定（打开 Claude Desktop / 退出），首次构建后复用
 let cached: Promise<Menu> | null = null;
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
