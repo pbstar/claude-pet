@@ -5,7 +5,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 安装包版本单一来源为根 `package.json`（`tauri.conf.json` 引用它，安装包版本自动跟随）；`src-tauri/Cargo.toml` 的 crate 版本仅内部元数据，发版时同步。
 
-## [未发布]
+## [0.1.3] - 2026-09-15
 
 ### 新增
 
@@ -108,6 +108,7 @@
 - hooks 信号失效时以 transcript 活跃度兜底，桌宠动画不僵死
 - 权限批准后徽标正确解除；Claude Desktop 模型选择器收敛为单条入口
 
+[0.1.3]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.3
 [0.1.2]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.2
 [0.1.1]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/pbstar/claude-pet/releases/tag/v0.1.0
